@@ -15,13 +15,13 @@ fi
 
 # 2) tunnel: reuse it if it's alive, otherwise start a fresh one
 URL=""
-if pgrep -f "cloudflared tunnel .*localhost:$PORT" >/dev/null; then
+if pgrep -f "cloudflared tunnel .*:$PORT" >/dev/null; then
   URL=$(grep -ao 'https://[a-z0-9-]*\.trycloudflare\.com' data/tunnel.log 2>/dev/null | head -1 || true)
-  if [ -n "$URL" ] && ! curl -sf -m 8 "$URL/api/me" >/dev/null; then URL=""; pkill -f "cloudflared tunnel .*localhost:$PORT" || true; fi
+  if [ -n "$URL" ] && ! curl -sf -m 8 "$URL/api/me" >/dev/null; then URL=""; pkill -f "cloudflared tunnel .*:$PORT" || true; fi
 fi
 if [ -z "$URL" ]; then
   echo "starting cloudflare tunnel…"
-  nohup cloudflared tunnel --no-autoupdate --url http://localhost:$PORT > data/tunnel.log 2>&1 &
+  : > data/cloudflared.yml; nohup cloudflared tunnel --config data/cloudflared.yml --no-autoupdate --url http://127.0.0.1:$PORT > data/tunnel.log 2>&1 &
   for _ in $(seq 60); do
     URL=$(grep -ao 'https://[a-z0-9-]*\.trycloudflare\.com' data/tunnel.log | head -1 || true)
     [ -n "$URL" ] && break; sleep 1
