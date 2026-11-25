@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PITWALL · bot racing</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <div class="brand"><span class="logo">PIT<b>WALL</b></span><span class="sub">bot racing sim</span></div>
+  <div class="clock"><span id="clock">0:00.0</span><span id="carcount" class="muted"></span></div>
+  <div class="controls">
+    <div class="seg admin-only" id="speedseg" hidden>
+      <button data-act="pause" title="Pause / resume (admin)" id="pausebtn">❚❚</button>
+      <button data-speed="1" class="on">1×</button>
+      <button data-speed="2">2×</button>
+      <button data-speed="4">4×</button>
+    </div>
+    <div class="seg toggles">
+      <button data-toggle="follow" title="Camera follows selected car (F)">Follow</button>
+      <button data-toggle="lidar" class="on" title="Lidar rays of selected car (L)">Lidar</button>
+      <button data-toggle="hitbox" title="Draw true hitboxes (H)">Hitboxes</button>
+      <button data-toggle="labels" class="on" title="Name tags">Labels</button>
+    </div>
+    <div class="authed" hidden>
+      <button class="primary" id="myscript">My script</button>
+      <label class="btn" title="Upload a .py file — it takes over your car immediately">Upload .py<input type="file" id="upload" accept=".py" hidden></label>
+      <span class="who"><span class="sw" id="who-sw"></span><b id="who"></b><button class="link" id="logout">Log out</button></span>
+    </div>
+    <button class="primary" id="loginbtn">Log in</button>
+  </div>
+</header>
+
+<main>
+  <section id="stage">
+    <canvas id="world"></canvas>
+    <div class="hint">scroll = zoom · drag = pan · double-click = fit · click a car to select</div>
+    <div id="legend">
+      <span><i style="background:#3ee6ff"></i>edge</span><span><i style="background:#ffa53e"></i>wall</span><span><i style="background:#ff4fd8"></i>car</span>
+    </div>
+  </section>
+
+  <aside>
+    <div class="card">
+      <div class="card-h">Standings <span class="muted" id="lapinfo"></span></div>
+      <table id="board">
+        <thead><tr><th>P</th><th class="l">Bot</th><th title="All-time laps completed">Laps</th><th class="c-last">Last</th><th>Best</th><th>Tyre</th><th></th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <div class="empty" id="board-empty">No cars on track yet — log in and upload your first script to join.</div>
+    </div>
+
+    <div class="card" id="sel">
+      <div class="card-h"><span class="sw" id="sel-sw"></span><span id="sel-name">Select a car</span><span class="chips" id="sel-chips"></span></div>
+      <div id="cam-wrap">
+      <canvas id="cam"></canvas>
+      <div class="cam-hud">
+        <div class="cam-name"><span class="sw" id="cam-sw"></span><span id="cam-name">—</span></div>
+        <div class="cam-speed"><span id="cam-v">0</span><small>km/h</small></div>
+        <div class="pedals"><div class="ped"><i id="cam-thr"></i></div><div class="ped brk"><i id="cam-brk"></i></div></div>
+        <div class="cam-flags" id="cam-flags"></div>
+      </div>
+    </div>
+      <div class="tele">
+        <div class="tv"><label>Speed</label><b id="t-v">—</b></div>
+        <div class="tv"><label>Lap</label><b id="t-lt">—</b></div>
+        <div class="tv"><label>G lat / long</label><b id="t-g">—</b></div>
+        <div class="tv"><label>Slip</label><b id="t-slip">—</b></div>
+        <div class="bar"><label>Throttle</label><span><i id="b-thr" class="g"></i></span></div>
+        <div class="bar"><label>Brake</label><span><i id="b-brk" class="r"></i></span></div>
+        <div class="bar steer"><label>Steer</label><span><i id="b-str"></i></span></div>
+        <div class="bar"><label>DRS <em id="t-drs"></em></label><span><i id="b-drs" class="c"></i></span></div>
+        <div class="bar"><label>Tyre wear <em id="t-wear"></em></label><span><i id="b-wear" class="y"></i></span></div>
+        <div class="bar"><label>Damage <em id="t-dmg"></em></label><span><i id="b-dmg" class="r"></i></span></div>
+      </div>
+      <div class="sel-actions">
+        <button id="edit" hidden>Edit script</button>
+        <button id="tobox" hidden title="Teleport this car back to its pit box">Reset to box</button>
+        <span class="muted small" id="t-ms"></span>
+      </div>
+      <pre id="botlog" class="log"></pre>
+    </div>
+
+    <div class="card grow">
+      <div class="card-h">Race control</div>
+      <ul id="events"></ul>
+    </div>
+  </aside>
+</main>
+
+<div id="login" class="overlay" hidden>
+  <form class="logindlg" id="loginform">
+    <div class="logo">PIT<b>WALL</b></div>
+    <label>Username<input id="lg-user" autocomplete="username" spellcheck="false" autocapitalize="off"></label>
+    <label>Password<input id="lg-pass" type="password" autocomplete="current-password"></label>
+    <div class="ed-err" id="lg-err" hidden></div>
+    <div class="row"><button type="button" id="lg-cancel">Cancel</button><button type="submit" class="primary">Log in</button></div>
+  </form>
+</div>
+<div id="toast" hidden></div>
+
+<div id="modal" hidden>
+  <div class="dlg">
+    <div class="dlg-h">
+      <span>bots/</span><input id="ed-name" spellcheck="false" maxlength="24"><span>.py</span>
+      <span class="muted small" id="ed-status"></span>
+      <div class="sp"></div>
+      <button id="ed-cancel">Close</button>
+      <button id="ed-deploy" class="primary">Deploy ⌘S</button>
+    </div>
+    <div class="ed-body">
+      <div class="gutter" id="ed-gutter"></div>
+      <textarea id="ed-code" spellcheck="false" autocapitalize="off" autocomplete="off"></textarea>
+    </div>
+    <div class="ed-err" id="ed-err" hidden></div>
+  </div>
+</div>
+
+<script src="config.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

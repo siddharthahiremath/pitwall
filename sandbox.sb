@@ -1,0 +1,11 @@
+(version 1)
+; PITWALL bot sandbox (macOS sandbox-exec). Bots get: no network, no file writes,
+; no reads of your home folder except Python itself, this app's code, and their own script.
+(allow default)
+(deny network*)
+(deny file-write*)
+(allow file-write* (literal "/dev/null"))
+(deny file-read* (subpath (param "HOME")))
+(allow file-read* (literal (param "HOME")) (subpath (param "PYHOME")) (subpath (param "PYHOME2")) (subpath (param "APPDIR")))
+(deny file-read* (subpath (param "DATADIR")))
+(allow file-read* (literal (param "BOTFILE")))
