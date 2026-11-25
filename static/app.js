@@ -446,13 +446,21 @@ function updateBoard(s) {
       <td>${c.laps}</td><td class="c-last">${fmt(c.last)}</td><td class="best ${c.best != null && c.best === bestOverall ? "pb" : ""}">${fmt(c.best)}</td>
       <td>${tyreHTML(c)}</td><td>${chips}</td></tr>`;
   }).join("");
-  const leader = s.cars[0];
-  $("#lapinfo").textContent = leader ? `leader on lap ${leader.laps + 1}` : "";
+  const teams = new Map();
+  for (const c of s.cars) {
+    const t = teams.get(c.owner) || { owner: c.owner, color: c.color, laps: 0, best: null };
+    t.laps += c.laps; if (c.best != null && (t.best == null || c.best < t.best)) t.best = c.best;
+    teams.set(c.owner, t);
+  }
+  const tl = [...teams.values()].sort((a, b) => b.laps - a.laps);
+  $("#teams").innerHTML = tl.map((t, i) => `<div class="team"><span class="tp">${i + 1}</span><span class="sw" style="background:${t.color}"></span><b>${esc(t.owner)}</b><span class="tl">${t.laps} laps</span><span class="tb">${fmt(t.best)}</span></div>`).join("");
+  $("#teams").hidden = !tl.length;
+  $("#lapinfo").textContent = tl.length ? "team = all 3 cars" : "";
 }
 function setBar(id, frac, label) { $(id).style.width = clamp(frac, 0, 1) * 100 + "%"; }
 function updateSel(s) {
   const c = s.cars.find((x) => x.id === selected);
-  const mine = !!(c && auth.user && c.name === auth.user);
+  const mine = !!(c && auth.user && c.owner === auth.user);
   $("#edit").hidden = !mine; $("#tobox").hidden = !(mine || (c && auth.admin));
   if (!c) {
     $("#sel-name").textContent = s.cars.length ? "Select a car" : "No car selected";
@@ -476,12 +484,13 @@ function updateSel(s) {
   st.style.left = (sv >= 0 ? 50 - sv * 50 : 50) + "%"; st.style.width = Math.abs(sv) * 50 + "%";
   $("#t-ms").textContent = c.alive ? `drive() ${c.ms.toFixed(2)} ms` : "bot not running";
   const log = $("#botlog");
-  if (mine && myStatus) {
-    if (myStatus.err) { log.className = "log err"; log.textContent = myStatus.err; }
-    else { log.className = "log"; log.textContent = myStatus.log && myStatus.log.length ? myStatus.log.join("\n") : "(print() output from your bot shows up here)"; }
+  const ms = mine && myStatus && myStatus.cars ? myStatus.cars[c.name] : null;
+  if (mine && ms) {
+    if (ms.err) { log.className = "log err"; log.textContent = ms.err; }
+    else { log.className = "log"; log.textContent = ms.log && ms.log.length ? ms.log.join("\n") : "(print() output from your bot shows up here)"; }
   } else if (!mine) {
     log.className = c.err ? "log err" : "log";
-    log.textContent = c.err ? `${c.name}'s bot is throwing errors (details are private to them).` : `Bot output is private to ${c.name}.`;
+    log.textContent = c.err ? `${c.owner}'s bot is throwing errors (details are private to them).` : `Bot output is private to ${c.owner}.`;
   }
   $("#cam-name").textContent = `P${c.pos} ${c.name}`;
   $("#cam-v").textContent = Math.round(c.v * 3.6);
@@ -539,7 +548,7 @@ async function api(path, body, method = "POST") {
 }
 // live feed: WebSocket (works through Cloudflare tunnels), falling back to polling
 let lastEv = 0, liveOk = false;
-function feed(s) { liveOk = true; if (s.ev) lastEv = s.ev; onSnap(s); }
+function feed(s) { liveOk = true; for (const c of s.cars) { if (!c.owner) c.owner = String(c.name).split("#")[0]; if (!c.num) c.num = 1; } if (s.ev) lastEv = s.ev; onSnap(s); }
 function connectLive() {
   const base = API || location.origin;
   let ws;
@@ -639,7 +648,7 @@ document.querySelectorAll("[data-speed]").forEach((b) => b.addEventListener("cli
 $("#pausebtn").addEventListener("click", () => api("/api/control", { action: latest && latest.paused ? "resume" : "pause" }).catch(toastErr));
 $("#tobox").addEventListener("click", () => {
   const c = latest && latest.cars.find((x) => x.id === selected); if (!c) return;
-  (c.name === auth.user ? api("/api/my/box", {}) : api("/api/control", { action: "box", id: selected })).catch(toastErr);
+  (c.owner === auth.user ? api("/api/my/box", { id: selected }) : api("/api/control", { action: "box", id: selected })).catch(toastErr);
 });
 
 // ------------------------------------------------------------ accounts
@@ -654,7 +663,7 @@ function renderAuth() {
   $(".authed").hidden = !on; $("#loginbtn").hidden = on;
   $("#speedseg").hidden = !auth.admin;
   $("#who").textContent = auth.user || "";
-  const acc = latest && latest.cars.find((c) => c.name === auth.user);
+  const acc = latest && latest.cars.find((c) => c.owner === auth.user);
   $("#who-sw").style.background = acc ? acc.color : "#555";
   if (latest) updateSel(latest);
 }
@@ -682,9 +691,9 @@ $("#loginform").addEventListener("submit", async (e) => {
     store.set("pw_token", j.token);
     $("#login").hidden = true; $("#lg-pass").value = "";
     renderAuth();
-    const c = latest && latest.cars.find((x) => x.name === j.user);
+    const c = latest && latest.cars.find((x) => x.owner === j.user);
     if (c) selected = c.id;
-    toast(c ? `Welcome back, ${j.user}` : `Logged in as ${j.user} — open "My script" and deploy to start your car`);
+    toast(c ? `Welcome back, ${j.user}` : `Logged in as ${j.user} — open "My script" and deploy to put your 3 cars on track`);
   } catch (err) { $("#lg-err").hidden = false; $("#lg-err").textContent = err.message; }
 });
 $("#logout").addEventListener("click", async () => {
@@ -727,13 +736,13 @@ function openEditor(code) {
 function closeEditor() { $("#modal").hidden = true; }
 async function pushScript(code) {
   await api("/api/my/bot", { code });
-  setTimeout(() => { const c = latest && latest.cars.find((x) => x.name === auth.user); if (c) selected = c.id; renderAuth(); }, 700);
+  setTimeout(() => { const c = latest && latest.cars.find((x) => x.owner === auth.user); if (c && !latest.cars.some((x) => x.id === selected && x.owner === auth.user)) selected = c.id; renderAuth(); }, 700);
 }
 async function deploy() {
   try {
     $("#ed-status").textContent = "deploying…";
     await pushScript(ed.value);
-    $("#ed-status").textContent = "deployed ✓ " + new Date().toLocaleTimeString() + " — your car is running it now";
+    $("#ed-status").textContent = "deployed ✓ " + new Date().toLocaleTimeString() + " — all 3 of your cars are running it now";
     $("#ed-err").hidden = true;
   } catch (err) {
     $("#ed-status").textContent = "";
@@ -754,7 +763,7 @@ $("#myscript").addEventListener("click", openMyScript);
 $("#edit").addEventListener("click", openMyScript);
 $("#upload").addEventListener("change", async (e) => {
   const f = e.target.files[0]; e.target.value = ""; if (!f) return;
-  try { await pushScript(await f.text()); toast(`${f.name} deployed — it's driving your car now`); }
+  try { await pushScript(await f.text()); toast(`${f.name} deployed — it's driving all 3 of your cars now`); }
   catch (err) { toastErr(err); }
 });
 

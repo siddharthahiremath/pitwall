@@ -169,3 +169,10 @@ button.link:hover { background: none; color: var(--text); }
 .logindlg .ed-err { border-radius: 6px; }
 #toast { position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%); background: #1c2230; border: 1px solid #2f3747; color: #fff; padding: 9px 16px; border-radius: 9px; z-index: 30; box-shadow: 0 10px 30px rgba(0,0,0,.5); max-width: calc(100% - 32px); }
 #toast.bad { border-color: #5a2020; background: #2a1215; color: #ffc0c0; }
+
+#teams { display: flex; flex-direction: column; gap: 2px; margin: -2px 0 10px; padding-bottom: 8px; border-bottom: 1px solid #1f2430; }
+.team { display: flex; align-items: center; gap: 7px; padding: 3px 4px; font-size: 13px; }
+.team .tp { width: 16px; color: var(--muted); font: 12px var(--mono); }
+.team b { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.team .tl { font: 600 13px var(--mono); }
+.team .tb { font: 12px var(--mono); color: var(--muted); width: 72px; text-align: right; }

@@ -1,4 +1,4 @@
-"""PITWALL bot. One file = one car. Save the file (or hit Deploy in the UI) and it hot-reloads.
+"""PITWALL bot. One script drives all 3 of your cars. Deploy it in the UI and it hot-swaps instantly.
 
 drive(state) is called ~20x per second and must return a dict of controls:
     throttle  -1..1   (negative = reverse, slow)
@@ -19,7 +19,10 @@ state (all metres / seconds / radians, world y-up, headings CCW from +x):
                     distance_to_pit_entry, pit_requested, pit_stops, collisions,
                     hitbox {length, width, corners [[x,y]*4]}
     state["cars"]   every other car with the same public fields + rel_x (ahead +), rel_y (left +),
-                    distance, track_gap (along-track metres, + = they are ahead)
+                    distance, track_gap (along-track metres, + = they are ahead), teammate (bool)
+
+Every player runs 3 cars, all driving THIS script (one process each). me["car_number"] is 1, 2 or 3 and
+me["owner"] is your username, so you can give each car a different role, e.g. different tyres.
     state["lidar"]  36 rays, 10 deg apart, angle relative to your heading (0 = straight ahead, + = left):
                     {"angle", "dist" (<=150), "hit": "edge"|"wall"|"car"|"none", "car_id"}
     state["ahead"]  centerline samples every 10 m for the next 400 m: {"d", "x", "y", "heading", "curvature"}

@@ -13,6 +13,7 @@ import secrets
 import os
 import random
 import select
+import signal
 import subprocess
 import sys
 import threading
@@ -35,6 +36,8 @@ TEMPLATE_FILE = os.path.join(ROOT, "examples", "template.py")
 SANDBOX = os.path.join(ROOT, "sandbox.sb")
 STATIC = os.path.join(ROOT, "static")
 MAX_CODE = 200_000
+CARS_PER_PLAYER = 3
+LIVE_FILE = os.path.join(DATA_DIR, "live.json")   # car positions, so a restart resumes mid-race
 PORT = int(os.environ.get("PORT", "8765"))
 
 PHYS_HZ = 120
@@ -256,8 +259,11 @@ def bot_command(path):
 
 # ---------------- car ----------------
 class Car:
-    def __init__(self, cid, name, path, slot, color):
+    def __init__(self, cid, owner, num, path, slot, color):
+        name = "%s#%d" % (owner, num)
         self.id = cid
+        self.owner = owner
+        self.num = num
         self.name = name
         self.path = path
         self.slot = slot
@@ -310,6 +316,7 @@ class Car:
         self.dist = st.get("dist", 0.0)
         self.worker = Worker(self)
         self.put_in_box(first=True)
+        restore_live(self)
 
     @property
     def speed(self):
@@ -534,7 +541,7 @@ class Car:
 
     def public(self):
         return {
-            "id": self.id, "name": self.name, "x": self.x, "y": self.y, "heading": self.h,
+            "id": self.id, "name": self.name, "owner": self.owner, "car_number": self.num, "x": self.x, "y": self.y, "heading": self.h,
             "vx": self.vx, "vy": self.vy, "speed": self.speed, "yaw_rate": self.omega,
             "s": self.s, "lateral_offset": self.lat, "laps": self.laps, "dist": self.dist,
             "status": self.status, "in_pit": self.status != "track", "ghost": self.ghost,
@@ -751,34 +758,45 @@ class Sim:
                 return i
         return None
 
-    def add_bot(self, name, path):
-        with self.lock:
-            slot = self.free_slot()
-            if slot is None:
-                return None
-            used_colors = {c.color for c in self.cars.values()}
-            color = ACCOUNTS.get(name, {}).get("color") or next((c for c in COLORS if c not in used_colors), "#%06x" % random.randint(0, 0xffffff))
-            car = Car(self.next_id, name, path, slot, color)
-            self.next_id += 1
-            car.box_timer = 1.0 + 0.8 * len(self.cars)
-            self.cars[name] = car
-        car.worker.start()
-        event("join", "%s joined (pit box %d)" % (name, slot + 1), car=car.id)
-        return car
+    def team(self, owner):
+        return sorted((c for c in self.cars.values() if c.owner == owner), key=lambda c: c.num)
 
-    def remove_bot(self, name):
+    def add_team(self, owner, path):
+        """Give a player their cars (all running the same script). Only adds the ones they don't have yet,
+        each in a free pit box, so existing cars keep racing untouched."""
+        added = []
         with self.lock:
-            car = self.cars.pop(name, None)
-        if car:
-            car.worker.stop()
-            event("leave", "%s left the session" % name, car=car.id)
+            have = {c.num for c in self.team(owner)}
+            color = ACCOUNTS.get(owner, {}).get("color")
+            if not color:
+                used = {c.color for c in self.cars.values() if c.owner != owner}
+                color = next((c for c in COLORS if c not in used), "#%06x" % random.randint(0, 0xffffff))
+            for num in range(1, CARS_PER_PLAYER + 1):
+                if num in have:
+                    continue
+                name = "%s#%d" % (owner, num)
+                live = LIVE.get(name)
+                slot = live.get("slot") if live else None
+                if slot is None or slot in {c.slot for c in self.cars.values()}:
+                    slot = self.free_slot()
+                if slot is None:
+                    break
+                car = Car(self.next_id, owner, num, path, slot, color)
+                self.next_id += 1
+                if car.status == "boxed" and name not in LIVE:
+                    car.box_timer = 1.0 + 1.5 * len(added)
+                self.cars[name] = car
+                added.append(car)
+        for car in added:
+            car.worker.start()
+            event("join", "%s joined (pit box %d)" % (car.name, car.slot + 1), car=car.id)
+        return added
 
-    def reload_bot(self, name):
-        car = self.cars.get(name)
-        if car:
+    def reload_team(self, owner):
+        for car in self.team(owner):
             car.mtime = os.path.getmtime(car.path)
             car.worker.start()
-            event("reload", "%s: new script deployed" % name, car=car.id)
+        event("reload", "%s: new script deployed to all %d cars" % (owner, len(self.team(owner))))
 
     # --- control: build state for each bot that is ready ---
     def build_state(self, car, cars):
@@ -815,6 +833,7 @@ class Sim:
             pub["distance"] = math.hypot(dx, dy)
             gap = (o.s - car.s) % L
             pub["track_gap"] = gap if gap < L / 2 else gap - L   # along-track metres, + = ahead
+            pub["teammate"] = o.owner == car.owner
             others.append(pub)
         return {
             "type": "tick", "tick": self.tick, "t": self.t, "dt": 1.0 / CTRL_HZ,
@@ -937,7 +956,7 @@ class Sim:
                 with w.lock:
                     err, log, ms, alive = w.error, list(w.log[-6:]), w.ms, w.alive
                 out.append({
-                    "id": c.id, "name": c.name, "color": c.color, "slot": c.slot, "pos": c.position,
+                    "id": c.id, "name": c.name, "owner": c.owner, "num": c.num, "color": c.color, "slot": c.slot, "pos": c.position,
                     "x": round(c.x, 3), "y": round(c.y, 3), "h": round(c.h, 4), "v": round(c.speed, 2),
                     "thr": round(c.throttle, 2), "brk": round(c.brake, 2), "str": round(c.steer, 3),
                     "drs": round(c.drs * 100), "laps": c.laps, "s": round(c.s, 1), "dist": round(c.dist, 1),
@@ -997,6 +1016,40 @@ def save_json(path, obj):
     os.replace(tmp, path)
 
 
+LIVE_FIELDS = ("x", "y", "h", "vx", "vy", "status", "pit_u", "pit_v", "pit_blend", "box_timer", "s", "idx", "lat",
+               "wear", "compound", "next_tyre", "damage", "ghost", "slot", "cp", "drs", "dist")
+
+
+def save_live():
+    with SIM.lock:
+        cars = {}
+        for c in SIM.cars.values():
+            d = {k: getattr(c, k) for k in LIVE_FIELDS}
+            d["lap_age"] = (SIM.t - c.lap_start) if c.lap_start is not None else None
+            cars[c.name] = d
+    save_json(LIVE_FILE, {"saved_at": time.time(), "cars": cars, "speed": SIM.speed, "paused": SIM.paused})
+
+
+def restore_live(car):
+    """Put a car back exactly where it was before the last restart (if that was recent)."""
+    d = LIVE.pop(car.name, None)   # use once
+    if not d:
+        return False
+    for k in LIVE_FIELDS:
+        if k in d and k != "slot":
+            setattr(car, k, d[k])
+    car.lap_start = (SIM.t - d["lap_age"]) if d.get("lap_age") is not None else None
+    if car.status == "track":
+        car.idx, car.s, car.lat = track.global_project(car.x, car.y)   # re-find where on the lap it is
+        car.update_track_info()
+    if "cp" not in d:   # checkpoints already passed this lap
+        car.cp = [car.s > f * L + 40 for f in (0.25, 0.5, 0.75)]
+    car.ghost = True   # becomes solid again as soon as it's clear of other cars
+    if car.status != "track":
+        car.status = "boxed" if car.status == "boxed" else car.status
+    return True
+
+
 def save_stats():
     with SIM.lock:
         for c in SIM.cars.values():
@@ -1010,6 +1063,7 @@ def stats_saver():
         time.sleep(5)
         try:
             save_stats()
+            save_live()
         except Exception:
             traceback.print_exc()
 
@@ -1049,10 +1103,9 @@ def deploy_script(user, code):
     fp = bot_path(user)
     with open(fp, "w") as f:
         f.write(code)
-    if user in SIM.cars:
-        SIM.reload_bot(user)
-    else:
-        SIM.add_bot(user, fp)
+    if SIM.team(user):
+        SIM.reload_team(user)
+    SIM.add_team(user, fp)   # tops the team up to CARS_PER_PLAYER (no-op once they have all of them)
 
 
 # ---------------- bot folder watcher (also picks up local edits to data/bots/<user>.py) ----------------
@@ -1064,11 +1117,11 @@ def scan_bots():
                 path = bot_path(name)
                 if not os.path.exists(path):
                     continue
-                car = SIM.cars.get(name)
-                if car is None:
-                    SIM.add_bot(name, path)
-                elif os.path.getmtime(path) != car.mtime:
-                    SIM.reload_bot(name)
+                team = SIM.team(name)
+                if len(team) < CARS_PER_PLAYER:
+                    SIM.add_team(name, path)
+                elif os.path.getmtime(path) != team[0].mtime:
+                    SIM.reload_team(name)
         except Exception:
             traceback.print_exc()
         time.sleep(0.5)
@@ -1144,12 +1197,12 @@ class Handler(BaseHTTPRequestHandler):
                 fp = bot_path(user)
                 code = open(fp).read() if os.path.exists(fp) else None
                 return self._send(200, {"code": code})
-            car = SIM.cars.get(user)
-            if not car:
-                return self._send(200, {"running": False})
-            w = car.worker
-            with w.lock:
-                return self._send(200, {"running": True, "err": w.error, "log": list(w.log), "ms": w.ms, "alive": w.alive})
+            out = {}
+            for car in SIM.team(user):
+                w = car.worker
+                with w.lock:
+                    out[car.name] = {"err": w.error, "log": list(w.log), "ms": w.ms, "alive": w.alive}
+            return self._send(200, {"running": bool(out), "cars": out})
         if any(part.startswith(".") for part in path.split("/")):
             return self._send(404, {"error": "not found"})
         if path == "/config.js" and not os.path.exists(os.path.join(STATIC, "config.js")):
@@ -1206,11 +1259,11 @@ class Handler(BaseHTTPRequestHandler):
             deploy_script(user, code)
             return self._send(200, {"ok": True})
         if path == "/api/my/box":
-            car = SIM.cars.get(user)
-            if car:
-                with SIM.lock:
-                    car.put_in_box(wait=2.0)
-                event("tow", "%s reset to pit box" % user, car=car.id)
+            for car in SIM.team(user):
+                if data.get("id") in (None, car.id):
+                    with SIM.lock:
+                        car.put_in_box(wait=2.0)
+                    event("tow", "%s reset to pit box" % car.name, car=car.id)
             return self._send(200, {"ok": True})
         if path == "/api/control":
             if not ACCOUNTS.get(user, {}).get("admin"):
@@ -1333,12 +1386,22 @@ def live_payload(last_ev):
 
 ACCOUNTS = {}
 SESSIONS = {}
+LIVE = {}
 
 
 def main():
     os.makedirs(BOT_DIR, exist_ok=True)
     ACCOUNTS.update(load_json(ACCOUNTS_FILE, {}))
     STATS.update(load_json(STATS_FILE, {}))
+    for k in [k for k in STATS if "#" not in k]:          # stats from the one-car-per-player days -> car #1
+        STATS.setdefault(k + "#1", STATS[k])
+        del STATS[k]
+    live = load_json(LIVE_FILE, {})
+    if time.time() - live.get("saved_at", 0) < 600:        # only resume positions after a quick restart
+        LIVE.update(live.get("cars", {}))
+        SIM.speed = clamp(num(live.get("speed", 1.0), 1.0), 0.25, 8)
+        SIM.paused = bool(live.get("paused", False))
+    signal.signal(signal.SIGTERM, lambda *a: (_ for _ in ()).throw(KeyboardInterrupt()))
     if not ACCOUNTS:
         print("No accounts yet. Run:  python3 manage.py init", flush=True)
     SESSIONS.update({k: v for k, v in load_json(SESSIONS_FILE, {}).items() if v in ACCOUNTS})
@@ -1355,6 +1418,7 @@ def main():
         pass
     finally:
         save_stats()
+        save_live()
         for c in list(SIM.cars.values()):
             c.worker.stop()
 

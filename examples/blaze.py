@@ -1,4 +1,4 @@
-"""PITWALL bot "blaze". One file = one car. Save the file (or hit Deploy in the UI) and it hot-reloads.
+"""PITWALL bot "blaze". One script drives all 3 of your cars. Deploy it in the UI and it hot-swaps instantly.
 
 drive(state) is called ~20x per second and must return a dict of controls:
     throttle  -1..1   (negative = reverse, slow)

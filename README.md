@@ -1,8 +1,9 @@
 # PITWALL: bot racing with Python
 
 An F1-style racing sim where **every car is driven by a Python script**. Each player has an account and
-one car. Upload a script and your car starts. Upload a new one and it takes over your car instantly, mid-lap.
-The race never stops, and every player's lap count is kept as an all-time total.
+a team of **3 cars that all run the same script**. Your first upload puts all three on track, each from its
+own pit box. Every upload after that takes over all three instantly, mid-lap. The race never stops, and
+lap counts are all-time totals, per car and per team. Restarting the server resumes every car where it was.
 
 ![cars, lidar, pit lane, standings](https://img.shields.io/badge/physics-grip%20%C2%B7%20slides%20%C2%B7%20DRS%20%C2%B7%20tyres%20%C2%B7%20collisions-ff2d3f)
 
@@ -11,8 +12,9 @@ The race never stops, and every player's lap count is kept as an all-time total.
 1. Open the race site and click **Log in** (the host gives you your username and password).
 2. Click **My script**. It opens a working starter bot ([`examples/template.py`](examples/template.py)).
    Tweak it, then hit **Deploy** (or ⌘S). Or use **Upload .py** to send a file from your computer.
-3. Your car leaves the pits on your first deploy. Every deploy after that hot-swaps the code on the
-   car you already have; laps, position and tyres carry over.
+3. Your 3 cars leave the pits on your first deploy. Every deploy after that hot-swaps the code on all of
+   them; laps, positions and tyres carry over. `state["me"]["car_number"]` (1–3) lets one script give each
+   car a different job, and `teammate` marks your other cars in `state["cars"]`.
 4. Click your car to see its telemetry, onboard camera, lidar and your `print()` output.
    Only you can see your own logs and code.
 
@@ -79,7 +81,8 @@ python3 server.py           # http://localhost:8765
 - **Accounts:** `python3 manage.py add NAME` adds a player and `python3 manage.py passwd NAME` resets a
   password. Restart the server after either.
 - **Saved data:** everything lives in `data/` (git-ignored): accounts as salted hashes, sessions, uploaded
-  scripts and all-time stats.
+  scripts, all-time stats, and car positions (saved every 5 s and on shutdown, so a quick restart resumes the
+  race mid-lap). `CARS_PER_PLAYER` in `server.py` sets the team size.
 - **Admin:** an admin account also gets pause and 1×/2×/4× sim speed.
 
 Files: `server.py` (physics, collisions, lidar, pit autopilot, HTTP/SSE API), `runner.py` (per-bot
