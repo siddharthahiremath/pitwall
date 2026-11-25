@@ -37,6 +37,7 @@ SANDBOX = os.path.join(ROOT, "sandbox.sb")
 STATIC = os.path.join(ROOT, "static")
 MAX_CODE = 200_000
 CARS_PER_PLAYER = 3
+MIN_SPEED, MAX_SPEED = 0.1, 50.0   # admin sim-speed range
 LIVE_FILE = os.path.join(DATA_DIR, "live.json")   # car positions, so a restart resumes mid-race
 PORT = int(os.environ.get("PORT", "8765"))
 
@@ -215,12 +216,12 @@ class Worker:
     def ready(self):
         return self.alive and self.busy_since is None
 
-    def send(self, state):
+    def send(self, line):
         if not self.alive:
             return
         try:
             self.busy_since = time.time()
-            self.proc.stdin.write(json.dumps(state, separators=(",", ":")) + "\n")
+            self.proc.stdin.write(line)
             self.proc.stdin.flush()
         except Exception as e:
             self.alive = False
@@ -535,7 +536,13 @@ class Car:
             self.cp = [False, False, False]  # went backwards over the line
 
     def update_track_info(self):
-        self.idx, self.s, self.lat = track.project(self.x, self.y, self.idx, 25)
+        # cars move < 1 m per step and points are 4 m apart, so a small search window is plenty;
+        # fall back to a wide search if the car somehow ended up far from its last index
+        i, s, lat = track.project(self.x, self.y, self.idx, 4)
+        px, py = track.pts[i]
+        if (self.x - px) ** 2 + (self.y - py) ** 2 > 40.0 ** 2:
+            i, s, lat = track.project(self.x, self.y, self.idx, 25)
+        self.idx, self.s, self.lat = i, s, lat
         a = abs(self.lat)
         self.surface = "asphalt" if a <= HALF_WIDTH else "kerb" if a <= HALF_WIDTH + KERB else "grass"
 
@@ -547,8 +554,29 @@ class Car:
             "status": self.status, "in_pit": self.status != "track", "ghost": self.ghost,
             "sliding": self.sliding, "tyre": self.compound, "tyre_wear": self.wear, "damage": self.damage,
             "drs": self.drs * 100, "hitbox": {"length": P["length"], "width": P["width"],
-                                                "corners": [[round(a, 3), round(b, 3)] for a, b in self.corners()]},
+                                                "corners": [list(p) for p in self.corners()]},
         }
+
+
+def car_full(car, sim):
+    d = car.public()
+    fx, fy = math.cos(car.h), math.sin(car.h)
+    hd = track.hd[car.idx]
+    d.update({
+        "v_long": car.vx * fx + car.vy * fy, "v_lat": -car.vx * fy + car.vy * fx,
+        "accel_long": car.a_long, "accel_lat": car.a_lat,
+        "throttle": car.throttle, "brake": car.brake, "steer": car.steer,
+        "slip_angle_deg": car.slip, "surface": car.surface, "on_track": car.surface != "grass",
+        "track_heading": hd, "heading_error": wrap_angle(car.h - hd),
+        "lap_progress": car.s / L, "lap_time": (sim.t - car.lap_start) if car.lap_start is not None else None,
+        "last_lap": car.last_lap, "best_lap": car.best_lap, "grip_now": car.grip(),
+        "tyre_grip_factor": tyre_grip(car.compound, car.wear), "next_tyre": car.next_tyre,
+        "pit_stops": car.pit_stops, "collisions": car.collisions, "pit_requested": car.pit_req,
+        "distance_to_pit_entry": (track.pit_entry_s - car.s) % L,
+        "position": getattr(car, "position", None),
+        "_idx": car.idx,
+    })
+    return d
 
 
 def fmt_time(t):
@@ -640,6 +668,8 @@ def resolve_pair(a, b, depth, n, cp):
 
 
 def wall_collide(car):
+    if abs(car.lat) + 3.2 < WALL:   # no corner can reach a wall (half-diagonal of the car is ~3 m)
+        return 0.0, None
     m = P["mass"]
     hit = 0.0
     pos = None
@@ -680,62 +710,59 @@ def wall_collide(car):
 
 
 # ---------------- lidar (numpy raycast) ----------------
-_POLY = {
-    "edge": [np.array(GEOM["left"]), np.array(GEOM["right"])],
-    "wall": [np.array(GEOM["wall_left"]), np.array(GEOM["wall_right"])],
-}
+# static boundary segments: [left edge, right edge, left wall, right wall], flattened once
+_N = track.n
+_SA = np.concatenate([np.array(GEOM[k], dtype=float) for k in ("left", "right", "wall_left", "wall_right")])
+_SB = np.concatenate([np.roll(np.array(GEOM[k], dtype=float), -1, axis=0) for k in ("left", "right", "wall_left", "wall_right")])
+_KIND_NAMES = ("edge", "wall", "car")
+_HIT_CHARS = "ewc"
 RAY_ANGLES = np.array([-math.pi + i * 2 * math.pi / LIDAR_RAYS for i in range(LIDAR_RAYS)])
+_LIDAR_W = 40                                     # +-40 points (+-160 m) covers the 150 m range
+_WIN = np.arange(-_LIDAR_W, _LIDAR_W)
+_POLY_OFF = (np.arange(4) * _N)[:, None]
+_STATIC_KINDS = np.repeat(np.array([0, 0, 1, 1]), len(_WIN))
 
 
 def lidar_scan(car, cars):
-    n = track.n
-    w = 45
-    idx = (np.arange(car.idx - w, car.idx + w) % n)
-    idx2 = (idx + 1) % n
-    segs_a, segs_b, kinds, owners = [], [], [], []
-    for kind, polys in _POLY.items():
-        for poly in polys:
-            segs_a.append(poly[idx])
-            segs_b.append(poly[idx2])
-            kinds += [kind] * len(idx)
-            owners += [None] * len(idx)
+    sel = (_POLY_OFF + (car.idx + _WIN) % _N).ravel()
+    A, B, kinds = _SA[sel], _SB[sel], _STATIC_KINDS
+    owners = None
+    extra_a, extra_b, ids = [], [], []
+    r2 = (LIDAR_RANGE + 5) ** 2
     for o in cars:
-        if o is car or o.status != "track" and o.status != "pit_in" and o.status != "pit_out":
-            continue
-        if (o.x - car.x) ** 2 + (o.y - car.y) ** 2 > (LIDAR_RANGE + 5) ** 2:
+        if o is car or o.status == "boxed" or (o.x - car.x) ** 2 + (o.y - car.y) ** 2 > r2:
             continue
         cs = o.corners()
-        segs_a.append(np.array(cs))
-        segs_b.append(np.array(cs[1:] + cs[:1]))
-        kinds += ["car"] * 4
-        owners += [o.id] * 4
-    A = np.concatenate(segs_a)
-    B = np.concatenate(segs_b)
+        extra_a += cs
+        extra_b += cs[1:] + cs[:1]
+        ids += [o.id] * 4
+    if extra_a:
+        A = np.concatenate([A, extra_a])
+        B = np.concatenate([B, extra_b])
+        kinds = np.concatenate([kinds, np.full(len(extra_a), 2)])
+        owners = [None] * len(sel) + ids
     ang = RAY_ANGLES + car.h
     dx, dy = np.cos(ang)[:, None], np.sin(ang)[:, None]
-    ex = (B[:, 0] - A[:, 0])[None, :]
-    ey = (B[:, 1] - A[:, 1])[None, :]
-    qx = (A[:, 0] - car.x)[None, :]
-    qy = (A[:, 1] - car.y)[None, :]
+    E = B - A
+    Q = A - (car.x, car.y)
+    ex, ey, qx, qy = E[:, 0], E[:, 1], Q[:, 0], Q[:, 1]
     den = dx * ey - dy * ex
-    with np.errstate(divide="ignore", invalid="ignore"):
-        t = (qx * ey - qy * ex) / den
-        u = (qx * dy - qy * dx) / den
-    valid = (np.abs(den) > 1e-9) & (t > 0) & (t <= LIDAR_RANGE) & (u >= 0) & (u <= 1)
-    t = np.where(valid, t, np.inf)
-    j = np.argmin(t, axis=1)
+    den[np.abs(den) < 1e-9] = np.nan
+    inv = 1.0 / den
+    t = (qx * ey - qy * ex) * inv
+    u = (qx * dy - qy * dx) * inv
+    t[~((t > 0) & (t <= LIDAR_RANGE) & (u >= 0) & (u <= 1))] = np.inf
+    j = t.argmin(axis=1)
     best = t[np.arange(LIDAR_RAYS), j]
-    dist, hit, who = [], [], []
-    for r in range(LIDAR_RAYS):
-        if np.isfinite(best[r]):
-            dist.append(float(best[r]))
-            hit.append(kinds[j[r]])
-            who.append(owners[j[r]])
-        else:
-            dist.append(LIDAR_RANGE)
-            hit.append("none")
-            who.append(None)
-    car.lidar, car.lidar_hit, car.lidar_car = dist, hit, who
+    hm = np.isfinite(best)
+    car.lidar = np.where(hm, best, LIDAR_RANGE).tolist()
+    kj = np.where(hm, kinds[j], -1).tolist()
+    car.lidar_hit = [_KIND_NAMES[k] if k >= 0 else "none" for k in kj]
+    if owners is None:
+        car.lidar_car = [None] * LIDAR_RAYS
+    else:
+        jl = j.tolist()
+        car.lidar_car = [owners[jl[r]] if kj[r] == 2 else None for r in range(LIDAR_RAYS)]
 
 
 # ---------------- simulation ----------------
@@ -750,6 +777,7 @@ class Sim:
         self.ctrl_acc = 0.0
         self.tick = 0
         self.sparks = []
+        self.rate = 1.0
 
     def free_slot(self):
         used = {c.slot for c in self.cars.values()}
@@ -799,49 +827,11 @@ class Sim:
         event("reload", "%s: new script deployed to all %d cars" % (owner, len(self.team(owner))))
 
     # --- control: build state for each bot that is ready ---
-    def build_state(self, car, cars):
-        lidar_scan(car, cars)
-        fx, fy = math.cos(car.h), math.sin(car.h)
-        vl = car.vx * fx + car.vy * fy
-        vt = -car.vx * fy + car.vy * fx
-        ahead = []
-        for d in range(0, 401, 10):
-            x, y, hd = track.point_at(car.s + d)
-            ahead.append({"d": d, "x": round(x, 2), "y": round(y, 2), "heading": round(hd, 4),
-                          "curvature": round(track.curvature_at(car.s + d), 6)})
-        me = car.public()
-        me.update({
-            "v_long": vl, "v_lat": vt, "accel_long": car.a_long, "accel_lat": car.a_lat,
-            "throttle": car.throttle, "brake": car.brake, "steer": car.steer,
-            "slip_angle_deg": car.slip, "surface": car.surface, "on_track": car.surface != "grass",
-            "track_heading": track.hd[car.idx], "heading_error": wrap_angle(car.h - track.hd[car.idx]),
-            "lap_progress": car.s / L, "lap_time": (self.t - car.lap_start) if car.lap_start is not None else None,
-            "last_lap": car.last_lap, "best_lap": car.best_lap, "grip_now": car.grip(),
-            "tyre_grip_factor": tyre_grip(car.compound, car.wear), "next_tyre": car.next_tyre,
-            "pit_stops": car.pit_stops, "collisions": car.collisions, "pit_requested": car.pit_req,
-            "distance_to_pit_entry": (track.pit_entry_s - car.s) % L,
-            "position": car.position if hasattr(car, "position") else None,
-        })
-        others = []
-        for o in cars:
-            if o is car:
-                continue
-            pub = o.public()
-            dx, dy = o.x - car.x, o.y - car.y
-            pub["rel_x"] = dx * fx + dy * fy      # metres ahead (+) / behind (-)
-            pub["rel_y"] = -dx * fy + dy * fx     # metres to the left (+) / right (-)
-            pub["distance"] = math.hypot(dx, dy)
-            gap = (o.s - car.s) % L
-            pub["track_gap"] = gap if gap < L / 2 else gap - L   # along-track metres, + = ahead
-            pub["teammate"] = o.owner == car.owner
-            others.append(pub)
-        return {
-            "type": "tick", "tick": self.tick, "t": self.t, "dt": 1.0 / CTRL_HZ,
-            "me": me, "cars": others,
-            "lidar": [{"angle": round(float(RAY_ANGLES[i]), 4), "dist": round(car.lidar[i], 2), "hit": car.lidar_hit[i],
-                       "car_id": car.lidar_car[i]} for i in range(LIDAR_RAYS)],
-            "ahead": ahead,
-        }
+    def world_line(self, cars):
+        """One JSON line describing every car, shared by all bots this tick (botview.py builds each bot's state)."""
+        world = {"type": "tick", "tick": self.tick, "t": self.t, "dt": 1.0 / CTRL_HZ,
+                 "cars": [car_full(c, self) for c in cars]}
+        return json.dumps(world, separators=(",", ":")) + "\n"
 
     def apply_controls(self, car, c):
         if c is None:
@@ -864,6 +854,7 @@ class Sim:
             if self.ctrl_acc >= 1.0 / CTRL_HZ:
                 self.ctrl_acc -= 1.0 / CTRL_HZ
                 self.tick += 1
+                ready = []
                 for car in cars:
                     w = car.worker
                     with w.lock:
@@ -873,7 +864,11 @@ class Sim:
                         self.apply_controls(car, c if not err else None)
                     w.check_hang()
                     if w.ready():
-                        w.send(self.build_state(car, cars))
+                        ready.append(w)
+                if ready:
+                    line = self.world_line(cars)
+                    for w in ready:
+                        w.send(line)
 
             for car in cars:
                 if car.status == "track":
@@ -948,8 +943,21 @@ class Sim:
         return cars
 
     def snapshot(self):
+        now = time.perf_counter()
+        cached = getattr(self, "_snap", None)
+        if cached and now - cached[0] < 1.0 / 45:      # every viewer shares one snapshot per frame
+            return dict(cached[1])
+        snap = self._snapshot(now)
+        self._snap = (now, snap)
+        return dict(snap)
+
+    def _snapshot(self, now):
         with self.lock:
             cars = self.rank()
+            for c in cars:                              # lidar rays for the UI only
+                if now - getattr(c, "lidar_at", 0) > 0.1:
+                    c.lidar_at = now
+                    lidar_scan(c, cars)
             out = []
             for c in cars:
                 w = c.worker
@@ -971,29 +979,36 @@ class Sim:
                     "lhit": "".join({"edge": "e", "wall": "w", "car": "c"}.get(k, "-") for k in c.lidar_hit),
                 })
             sparks, self.sparks = self.sparks, []
-            return {"t": round(self.t, 3), "paused": self.paused, "speed": self.speed, "cars": out, "sparks": sparks}
+            return {"t": round(self.t, 3), "paused": self.paused, "speed": self.speed, "rate": round(self.rate, 2), "cars": out, "sparks": sparks}
 
     def run(self):
+        """Fixed-step physics at PHYS_HZ, run self.speed times faster than real time when the CPU allows.
+        self.rate is the speed actually achieved (shown in the UI when it falls short)."""
         dt = 1.0 / PHYS_HZ
         last = time.perf_counter()
         acc = 0.0
+        win_real, win_sim = 0.0, 0.0
         while True:
             now = time.perf_counter()
             frame = min(now - last, 0.1)
             last = now
+            t_before = self.t
             if not self.paused:
                 acc += frame * self.speed
-                steps = 0
-                while acc >= dt and steps < 40:
+                budget_end = now + 0.025               # never hog the loop for more than 25 ms
+                while acc >= dt and time.perf_counter() < budget_end:
                     try:
                         self.step(dt)
                     except Exception:
                         traceback.print_exc()
                     acc -= dt
-                    steps += 1
-                if steps >= 40:
-                    acc = 0.0
-            time.sleep(0.002)
+                acc = min(acc, 0.25 * self.speed)     # can't keep up: drop the backlog instead of spiralling
+            win_real += frame
+            win_sim += self.t - t_before
+            if win_real >= 1.0:
+                self.rate = 0.0 if self.paused else win_sim / win_real
+                win_real = win_sim = 0.0
+            time.sleep(0.001)
 
 
 STATS = {}
@@ -1275,7 +1290,7 @@ class Handler(BaseHTTPRequestHandler):
                 elif act == "resume":
                     SIM.paused = False
                 elif act == "speed":
-                    SIM.speed = clamp(num(data.get("value", 1), 1), 0.25, 8)
+                    SIM.speed = clamp(num(data.get("value", 1), 1), MIN_SPEED, MAX_SPEED)
                 elif act == "box":
                     car = next((c for c in SIM.cars.values() if c.id == data.get("id")), None)
                     if car:
@@ -1399,7 +1414,7 @@ def main():
     live = load_json(LIVE_FILE, {})
     if time.time() - live.get("saved_at", 0) < 600:        # only resume positions after a quick restart
         LIVE.update(live.get("cars", {}))
-        SIM.speed = clamp(num(live.get("speed", 1.0), 1.0), 0.25, 8)
+        SIM.speed = clamp(num(live.get("speed", 1.0), 1.0), MIN_SPEED, MAX_SPEED)
         SIM.paused = bool(live.get("paused", False))
     signal.signal(signal.SIGTERM, lambda *a: (_ for _ in ()).throw(KeyboardInterrupt()))
     if not ACCOUNTS:

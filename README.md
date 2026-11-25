@@ -83,7 +83,10 @@ python3 server.py           # http://localhost:8765
 - **Saved data:** everything lives in `data/` (git-ignored): accounts as salted hashes, sessions, uploaded
   scripts, all-time stats, and car positions (saved every 5 s and on shutdown, so a quick restart resumes the
   race mid-lap). `CARS_PER_PLAYER` in `server.py` sets the team size.
-- **Admin:** an admin account also gets pause and 1×/2×/4× sim speed.
+- **Admin:** an admin account also gets pause and sim speed (presets or any value from 0.1× to 50×).
+  The header shows the actual speed if the CPU can't keep up. Each bot builds its own view of the world
+  (`botview.py`) in its own process, so speed scales well with the number of cars. Very high speeds give
+  bots less sim time to react, so expect more mistakes.
 
-Files: `server.py` (physics, collisions, lidar, pit autopilot, HTTP/SSE API), `runner.py` (per-bot
-process), `track.py` (circuit geometry), `static/` (the web UI), `sandbox.sb` (bot sandbox profile).
+Files: `server.py` (physics, collisions, lidar, pit autopilot, HTTP/SSE API), `runner.py` + `botview.py` (per-bot
+process and its view of the world), `track.py` (circuit geometry), `static/` (the web UI), `sandbox.sb` (bot sandbox profile).

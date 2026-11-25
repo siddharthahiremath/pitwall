@@ -18,7 +18,7 @@ state (all metres / seconds / radians, world y-up, headings CCW from +x):
                     damage (0..1), status ("track"|"pit_in"|"boxed"|"pit_out"), in_pit, ghost,
                     distance_to_pit_entry, pit_requested, pit_stops, collisions,
                     hitbox {length, width, corners [[x,y]*4]}
-    state["cars"]   every other car with the same public fields + rel_x (ahead +), rel_y (left +),
+    state["cars"]   every other car with the same fields as "me" (inputs included) + rel_x (ahead +), rel_y (left +),
                     distance, track_gap (along-track metres, + = they are ahead), teammate (bool)
 
 Every player runs 3 cars, all driving THIS script (one process each). me["car_number"] is 1, 2 or 3 and

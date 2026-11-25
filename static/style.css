@@ -176,3 +176,10 @@ button.link:hover { background: none; color: var(--text); }
 .team b { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .team .tl { font: 600 13px var(--mono); }
 .team .tb { font: 12px var(--mono); color: var(--muted); width: 72px; text-align: right; }
+
+.custom-speed { display: inline-flex; align-items: center; padding: 0 8px 0 6px; gap: 2px; border-left: 1px solid var(--line); }
+.custom-speed input { width: 46px; background: #0b0e13; color: #fff; border: 1px solid var(--line); border-radius: 5px; padding: 3px 5px; font: 12px var(--mono); text-align: right; outline: none; -moz-appearance: textfield; }
+.custom-speed input::-webkit-outer-spin-button, .custom-speed input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+.custom-speed input:focus { border-color: var(--accent); }
+.custom-speed input.on { border-color: var(--accent); box-shadow: inset 0 -2px 0 var(--accent); }
+.custom-speed i { font-style: normal; color: var(--muted); font-size: 12px; }

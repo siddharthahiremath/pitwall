@@ -533,7 +533,11 @@ function onSnap(s) {
     lastBoard = now;
     updateBoard(s); updateSel(s);
     $("#clock").textContent = fmtClock(s.t);
-    $("#carcount").textContent = `${s.cars.length} car${s.cars.length === 1 ? "" : "s"}${s.paused ? " · paused" : s.speed !== 1 ? " · " + s.speed + "×" : ""}`;
+    const behind = !s.paused && s.rate != null && s.rate < s.speed * 0.9;
+    $("#carcount").textContent = `${s.cars.length} car${s.cars.length === 1 ? "" : "s"}${s.paused ? " · paused" : s.speed !== 1 ? " · " + s.speed + "×" : ""}${behind ? ` (running ${s.rate.toFixed(1)}×, CPU-limited)` : ""}`;
+    const si = $("#speedin"), preset = [1, 2, 4].includes(s.speed);
+    si.classList.toggle("on", !preset && !s.paused);
+    if (document.activeElement !== si) si.value = preset ? "" : s.speed;
     $("#pausebtn").textContent = s.paused ? "▶" : "❚❚";
     document.querySelectorAll("[data-speed]").forEach((b) => b.classList.toggle("on", +b.dataset.speed === s.speed && !s.paused));
   }
@@ -645,6 +649,15 @@ document.querySelectorAll("[data-speed]").forEach((b) => b.addEventListener("cli
   await api("/api/control", { action: "speed", value: +b.dataset.speed });
   await api("/api/control", { action: "resume" });
 }));
+async function setSpeed(v) {
+  v = Number(v);
+  if (!isFinite(v) || v <= 0) return toast("Enter a speed like 0.5, 3 or 12", true);
+  v = Math.min(50, Math.max(0.1, v));
+  try { await api("/api/control", { action: "speed", value: v }); await api("/api/control", { action: "resume" }); toast(`Sim speed set to ${v}×`); }
+  catch (e) { toastErr(e); }
+}
+$("#speedin").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); e.target.blur(); } });   // blur fires "change"
+$("#speedin").addEventListener("change", (e) => { if (e.target.value !== "") setSpeed(e.target.value); });
 $("#pausebtn").addEventListener("click", () => api("/api/control", { action: latest && latest.paused ? "resume" : "pause" }).catch(toastErr));
 $("#tobox").addEventListener("click", () => {
   const c = latest && latest.cars.find((x) => x.id === selected); if (!c) return;

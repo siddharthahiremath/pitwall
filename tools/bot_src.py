@@ -23,8 +23,17 @@ DRS_CLOSE = __DRS_CLOSE__   # seconds of look-ahead to have the flap shut before
 TYRE = "__TYRE__"
 OUTLAP_GRIP = __OUTLAP_GRIP__   # grip use on the out-lap after a stop (saves the tyres for the flying lap; 0 = push)
 JIT_MARGIN = __JIT_MARGIN__     # grip use dropped by this much when our replies arrive late often
-PASS_GAP = __PASS_GAP__         # lateral centre-to-centre clearance when passing (m)
+PASS_GAP = __PASS_GAP__
+FOLLOW_ZONE = __FOLLOW_ZONE__
+LANE_RATE_STR, LANE_RATE_CRN, SHIFT_GRIP = __LANE_RATE_STR__, __LANE_RATE_CRN__, __SHIFT_GRIP__
+ALONG_GAP, ALONG_LAT, ALONG_REL = __ALONG_GAP__, __ALONG_LAT__, __ALONG_REL__
+GUARD_A, GUARD_DO, GUARD_MIN = __GUARD_A__, __GUARD_DO__, __GUARD_MIN__   # following guard (lower = more aggressive)         # lateral centre-to-centre clearance when passing (m)
 PIT_WEAR = __PIT_WEAR__     # pit when tyre wear passes this (0..1)
+
+# per-car roles (all cars run this same file): QUALI cars hunt the fastest lap on softs, the rest race on hards
+QUALI_CARS = __QUALI_CARS__
+Q_TYRE, Q_PIT_WEAR, Q_GRIP, Q_OUTLAP = "soft", __Q_PIT_WEAR__, __Q_GRIP__, __Q_OUTLAP__
+_ROLE = [None]
 
 LINE_N = __LINE_N__
 LINE = "__LINE__"
@@ -229,6 +238,8 @@ def cidx(s_track):
 
 
 DECEL = {}
+SIDE = {}
+SIDE_T = {}
 _PREV = {}
 
 
@@ -259,9 +270,12 @@ def traffic(state, me, v, i_line):
         vo = o["speed"]
         rel = v - vo
         if gap > 6:
-            if rel <= 0.3 or gap / rel > 4.0:
+            if gap < FOLLOW_ZONE and rel > -2.0:
+                tt = gap / max(rel, 1.0)          # sitting in their wake: pull out now, pass under braking
+            elif rel <= 0.3 or gap / rel > 4.0:
                 continue
-            tt = gap / rel
+            else:
+                tt = gap / rel
         else:
             tt = 0.0
         ci = cidx(o["s"])
@@ -270,6 +284,9 @@ def traffic(state, me, v, i_line):
         olat_p = max(-7.5, min(7.5, olat + olat_rate * min(tt, 1.0)))
         lo, hi = min(olat, olat_p), max(olat, olat_p)
         line_there = G["off"][cidx(o["s"] + 0.0)]
+        # half-alongside a car just ahead without a real speed edge: don't hang there, drop back and re-attack
+        if 0 < gap < ALONG_GAP and abs(my_lat - olat) < ALONG_LAT and rel < ALONG_REL:
+            vcap = min(vcap, vo - 2.5)
         conflict = (lo - need < line_there < hi + need) or (gap < 15 and lo - need < my_lat < hi + need)
         if not conflict:
             continue
@@ -279,22 +296,39 @@ def traffic(state, me, v, i_line):
             side = 1 if my_lat >= 0.5 * (lo + hi) else -1
             cands = [t for t in cands if (t - 0.5 * (lo + hi)) * side > 0]
         if cands:
-            tgt = min(cands, key=lambda t: abs(t - my_lat) + 0.5 * abs(t - line_there))
+            prev = SIDE.get(o["id"])
+            same = [t for t in cands if prev is not None and (t - 0.5 * (lo + hi)) * prev > 0]
+            if same:
+                tgt = same[0]          # committed: keep attacking on the side we picked
+            else:
+                tgt = min(cands, key=lambda t: abs(t - my_lat) + 0.5 * abs(t - line_there))
+            SIDE[o["id"]] = 1 if tgt > 0.5 * (lo + hi) else -1
+            SIDE_T[o["id"]] = state["t"]
             b = tgt - off_here
             if best is None or gap < best[0]:
                 best = (gap, b)
         # sharing their lane: keep a gap we can stop in even if they keep braking as hard as they are now
         if gap > 0 and lo - 2.7 < my_lat < hi + 2.7:
-            d_o = max(DECEL.get(o["id"], 0.0) * 1.3, 12.0)
-            A = 20.0
-            R = gap - 8.0 + vo * vo / (2 * d_o)
+            d_o = max(DECEL.get(o["id"], 0.0) * 1.3, GUARD_DO)
+            A = GUARD_A
+            R = gap - GUARD_MIN + vo * vo / (2 * d_o)
             vc = A * (-0.15 + math.sqrt(0.0225 + 2 * max(R, 0.0) / A))
-            vcap = min(vcap, max(vc, vo - 3.0) if gap > 8.0 else vo - 2.0)
+            vcap = min(vcap, max(vc, vo - 3.0) if gap > GUARD_MIN else vo - 2.0)
+    for k in [k for k, t in SIDE_T.items() if state["t"] - t > 2.0]:
+        SIDE.pop(k, None)
+        SIDE_T.pop(k, None)
     return (best[1] if best else 0.0), vcap
 
 
 def drive(state):
     me = state["me"]
+    if _ROLE[0] is None:
+        global TYRE, PIT_WEAR, GRIP_USE, OUTLAP_GRIP
+        _ROLE[0] = "quali" if me.get("car_number") in QUALI_CARS else "race"
+        if _ROLE[0] == "quali":
+            TYRE, PIT_WEAR, GRIP_USE, OUTLAP_GRIP = Q_TYRE, Q_PIT_WEAR, Q_GRIP, Q_OUTLAP
+            G["gu"] = None
+        print("car %s role %s tyre %s" % (me.get("car_number"), _ROLE[0], TYRE))
     if not G["ok"]:
         init(state["track"], state["params"])
     v = me["speed"]
@@ -334,7 +368,7 @@ def drive(state):
     track_others(state)
     btgt, vcap = traffic(state, me, v, i)
     kc = max(abs(G["k"][i]), abs(G["k"][(i + 3) % G["n"]]), abs(G["k"][(i + 8) % G["n"]]))
-    rate = 0.30 if kc < 1 / 500.0 else 0.10              # change lanes on straights, gently in corners
+    rate = LANE_RATE_STR if kc < 1 / 500.0 else LANE_RATE_CRN              # change lanes on straights, gently in corners
     shifting = abs(btgt - G["bias"]) > 0.3
     G["bias"] += max(-rate, min(rate, btgt - G["bias"]))
     W = G["hw"] - 0.7
@@ -363,7 +397,7 @@ def drive(state):
         kk = kff
         kb2 = abs(kk / max(0.2, 1 - kk * bias))
         kb = max(kb, kb2)
-        mu = P["mu"] * gf * (0.88 if shifting else 0.95)
+        mu = P["mu"] * gf * (SHIFT_GRIP if shifting else 0.95)
         den = kb - mu * P["k_down"]
         if den > 1e-9:
             vb = math.sqrt(mu * P["g"] / den)

@@ -55,10 +55,17 @@ def main():
     out({"type": "ready", "log": buf.getvalue()})
 
     drive = g["drive"]
+    from botview import TrackView, build_state
+    view = TrackView(track)
+    my_id = init["car_id"]
     for line in sys.stdin:
         try:
-            state = json.loads(line)
+            state = build_state(view, json.loads(line), my_id)   # world snapshot -> this car's view of it
         except Exception:
+            out({"tick": None, "error": "state build failed:\n" + traceback.format_exc(limit=3)})
+            continue
+        if state is None:
+            out({"tick": None, "controls": {}, "log": "", "ms": 0})
             continue
         state["track"] = track
         state["params"] = params
