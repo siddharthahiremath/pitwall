@@ -4,6 +4,7 @@
 Run:  python3 manage.py init      (creates accounts, once)
       python3 server.py           then open http://localhost:8765
 """
+import base64
 import hashlib
 import hmac
 import json
@@ -18,7 +19,7 @@ import threading
 import time
 import traceback
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
-from urllib.parse import urlparse, unquote
+from urllib.parse import urlparse, unquote, parse_qs
 
 import numpy as np
 
@@ -1121,6 +1122,13 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, {"params": P, "tyres": TYRES})
         if path == "/api/stream":
             return self.stream()
+        if path == "/api/ws":
+            return self.websocket()
+        if path == "/api/snapshot":   # polling fallback: ?since=<last event id>
+            q = parse_qs(urlparse(self.path).query)
+            since = int(num(q.get("since", ["0"])[0]))
+            snap, _ = live_payload(since if since > 0 else max(0, EV_ID[0] - 30))
+            return self._send(200, snap)
         if path == "/api/template":
             with open(TEMPLATE_FILE) as f:
                 return self._send(200, {"code": f.read()})
@@ -1227,11 +1235,69 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, {"ok": True})
         self._send(404, {"error": "not found"})
 
+    def websocket(self):
+        """Minimal send-only WebSocket (RFC 6455). Works through Cloudflare quick tunnels, unlike SSE."""
+        key = self.headers.get("Sec-WebSocket-Key")
+        if not key or "websocket" not in self.headers.get("Upgrade", "").lower():
+            return self._send(400, {"error": "websocket upgrade required"})
+        accept = base64.b64encode(hashlib.sha1((key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode()).digest()).decode()
+        self.send_response(101, "Switching Protocols")
+        self.send_header("Upgrade", "websocket")
+        self.send_header("Connection", "Upgrade")
+        self.send_header("Sec-WebSocket-Accept", accept)
+        self.end_headers()
+        self.close_connection = True
+        sock = self.connection
+        sock.settimeout(None)
+        closed = threading.Event()
+
+        def reader():   # drain client frames; answer pings, stop on close
+            try:
+                while not closed.is_set():
+                    hdr = self.rfile.read(2)
+                    if len(hdr) < 2:
+                        break
+                    op, ln = hdr[0] & 0x0F, hdr[1] & 0x7F
+                    if ln == 126:
+                        ln = int.from_bytes(self.rfile.read(2), "big")
+                    elif ln == 127:
+                        ln = int.from_bytes(self.rfile.read(8), "big")
+                    mask = self.rfile.read(4) if hdr[1] & 0x80 else b"\0\0\0\0"
+                    data = bytes(b ^ mask[i % 4] for i, b in enumerate(self.rfile.read(ln)))
+                    if op == 0x8:
+                        break
+                    if op == 0x9:
+                        send(data, 0xA)
+            except Exception:
+                pass
+            closed.set()
+
+        lock = threading.Lock()
+
+        def send(payload, op=0x1):
+            n = len(payload)
+            head = bytes([0x80 | op]) + (bytes([n]) if n < 126 else bytes([126]) + n.to_bytes(2, "big") if n < 65536
+                                          else bytes([127]) + n.to_bytes(8, "big"))
+            with lock:
+                sock.sendall(head + payload)
+
+        threading.Thread(target=reader, daemon=True).start()
+        last_ev = max(0, EV_ID[0] - 30)
+        try:
+            while not closed.is_set():
+                snap, last_ev = live_payload(last_ev)
+                send(json.dumps(snap, separators=(",", ":")).encode())
+                time.sleep(1.0 / NET_HZ)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
+        closed.set()
+
     def stream(self):
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
-        self.send_header("Cache-Control", "no-store")
+        self.send_header("Cache-Control", "no-cache, no-transform")   # no-transform: proxies must not gzip/buffer
         self.send_header("X-Accel-Buffering", "no")
+        self.send_header("Transfer-Encoding", "chunked")
         self._cors()
         self.end_headers()
         with EV_LOCK:
@@ -1245,12 +1311,24 @@ class Handler(BaseHTTPRequestHandler):
                     if evs:
                         last_ev = evs[-1]["id"]
                 snap["events"] = evs
-                self.wfile.write(("data: " + json.dumps(snap, separators=(",", ":")) + "\n\n").encode())
+                chunk = ("data: " + json.dumps(snap, separators=(",", ":")) + "\n\n").encode()
+                self.wfile.write(b"%x\r\n%s\r\n" % (len(chunk), chunk))
                 self.wfile.flush()
                 n += 1
                 time.sleep(1.0 / NET_HZ)
         except (BrokenPipeError, ConnectionResetError, OSError):
             return
+
+
+def live_payload(last_ev):
+    snap = SIM.snapshot()
+    with EV_LOCK:
+        evs = [e for e in EVENTS if e["id"] > last_ev]
+        if evs:
+            last_ev = evs[-1]["id"]
+    snap["events"] = evs
+    snap["ev"] = last_ev
+    return snap, last_ev
 
 
 ACCOUNTS = {}

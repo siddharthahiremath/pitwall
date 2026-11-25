@@ -537,6 +537,40 @@ async function api(path, body, method = "POST") {
   if (!r.ok) throw new Error(j.error || r.statusText);
   return j;
 }
+// live feed: WebSocket (works through Cloudflare tunnels), falling back to polling
+let lastEv = 0, liveOk = false;
+function feed(s) { liveOk = true; if (s.ev) lastEv = s.ev; onSnap(s); }
+function connectLive() {
+  const base = API || location.origin;
+  let ws;
+  try { ws = new WebSocket(base.replace(/^http/, "ws") + "/api/ws"); } catch { return startPolling(); }
+  let opened = false;
+  const giveUp = setTimeout(() => { if (!opened) { try { ws.close(); } catch {} startPolling(); } }, 6000);
+  ws.onopen = () => { opened = true; clearTimeout(giveUp); };
+  ws.onmessage = (m) => feed(JSON.parse(m.data));
+  ws.onclose = () => {
+    clearTimeout(giveUp);
+    if (!opened) return startPolling();
+    setTimeout(async () => {   // dropped: the server may have moved to a new tunnel
+      try { if ((await resolveApi()) !== API) return location.reload(); } catch {}
+      connectLive();
+    }, 2000);
+  };
+}
+let polling = false;
+async function startPolling() {
+  if (polling) return; polling = true;
+  let fails = 0;
+  for (;;) {
+    try {
+      const r = await fetch(API + "/api/snapshot?since=" + lastEv, { cache: "no-store" });
+      feed(await r.json()); fails = 0;
+    } catch {
+      if (++fails % 10 === 0) { try { if ((await resolveApi()) !== API) return location.reload(); } catch {} }
+    }
+    await new Promise((res) => setTimeout(res, 100));
+  }
+}
 async function boot() {
   try {
     API = await resolveApi();
@@ -547,14 +581,7 @@ async function boot() {
     return;
   }
   buildPaths();
-  const es = new EventSource(API + "/api/stream");
-  es.onmessage = (m) => onSnap(JSON.parse(m.data));
-  let retry = null;
-  es.onopen = () => { clearTimeout(retry); retry = null; };
-  es.onerror = () => {   // server moved (new tunnel) or went away: re-check where it lives
-    if (retry) return;
-    retry = setTimeout(async () => { retry = null; try { if ((await resolveApi()) !== API) location.reload(); } catch {} }, 8000);
-  };
+  connectLive();
   requestAnimationFrame(frame);
   await refreshMe();
   setInterval(pollMyStatus, 1000);
