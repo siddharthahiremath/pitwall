@@ -893,6 +893,7 @@ class Sim:
             c.update_track_info()
             c.ghost = True
             c.grid_hold = True
+            c.dist = -(L - s0) if s0 > L / 2 else s0   # distance from the start line, so standings start in grid order
         self.phase = "grid"
         self.start_at = time.time() + 20.0
         event("grid", "GRID: " + ", ".join("P%d %s %s" % (i + 1, c.name, fmt_time(self.quali[c.name]) if c.name in self.quali else "no time")
@@ -1202,7 +1203,8 @@ def save_live():
             d["lap_age"] = (SIM.t - c.lap_start) if c.lap_start is not None else None
             cars[c.name] = d
     save_json(LIVE_FILE, {"saved_at": time.time(), "cars": cars, "speed": SIM.speed, "paused": SIM.paused,
-                          "start_at": SIM.start_at, "grid_id": GRID_ID[0], "quali_id": QUALI_ID[0]})
+                          "start_at": SIM.start_at, "grid_id": GRID_ID[0], "quali_id": QUALI_ID[0],
+                          "distfix_id": DISTFIX_ID[0], "phase": SIM.phase, "quali": SIM.quali})
 
 
 def restore_live(car):
@@ -1606,7 +1608,8 @@ SESSIONS = {}
 LIVE = {}
 SLOTS = {}
 GRID_ID = [""]
-QUALI_ID = [""]   # PITWALL_GRID_START value already applied (so a redeploy doesn't reset laps again)
+QUALI_ID = [""]
+DISTFIX_ID = [""]   # PITWALL_GRID_START value already applied (so a redeploy doesn't reset laps again)
 
 
 def parse_when(v):
@@ -1638,6 +1641,9 @@ def main():
     SIM.start_at = float(live.get("start_at", 0) or 0)
     GRID_ID[0] = live.get("grid_id", "")
     QUALI_ID[0] = live.get("quali_id", "")
+    DISTFIX_ID[0] = live.get("distfix_id", "")
+    if live.get("phase") == "race":
+        SIM.quali.update(live.get("quali") or {})
     if time.time() - live.get("saved_at", 0) < 600:        # only resume positions after a quick restart
         LIVE.update(live.get("cars", {}))
         SIM.speed = clamp(num(live.get("speed", 1.0), 1.0), MIN_SPEED, MAX_SPEED)
@@ -1654,6 +1660,19 @@ def main():
         GRID_ID[0] = want
         SIM.start_at = parse_when(want)    # hold everyone right away; laps reset once cars are loaded
         threading.Thread(target=pending_grid_start, args=(SIM.start_at,), daemon=True).start()
+    fix = os.environ.get("PITWALL_DIST_FIX", "").strip()   # one-time "name:metres,name:metres" standings correction
+    if fix and fix != DISTFIX_ID[0]:
+        DISTFIX_ID[0] = fix
+        def apply_fix():
+            time.sleep(5)
+            with SIM.lock:
+                for part in fix.split(","):
+                    name, _, m = part.partition(":")
+                    car = SIM.cars.get(name.strip())
+                    if car:
+                        car.dist += float(m)
+            event("info", "Race control: standings corrected for grid positions")
+        threading.Thread(target=apply_fix, daemon=True).start()
     want = os.environ.get("PITWALL_QUALI", "").strip()
     if want and want != QUALI_ID[0]:
         QUALI_ID[0] = want
