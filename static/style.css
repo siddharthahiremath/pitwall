@@ -196,3 +196,10 @@ button.link:hover { background: none; color: var(--text); }
 #countdown .cd-lights i.on { background: #ff2a2a; border-color: #ff6b6b; box-shadow: 0 0 10px #ff2a2a; }
 #countdown .cd-sub { margin-top: 8px; font-size: 11px; color: #9aa3ad; max-width: 560px; line-height: 1.5; }
 @media (max-width: 600px) { #countdown { top: 8px; padding: 8px 14px 10px; min-width: 0; } #countdown .cd-time { font-size: 28px; } }
+
+#countdown .qrow { display: grid; grid-template-columns: 30px 1fr 74px 60px; gap: 8px; text-align: left;
+  font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace; color: #d6dbe0; font-variant-numeric: tabular-nums; }
+#countdown .qrow.qnew { color: #ffd84d; }
+#countdown .qrow span:nth-child(4) { color: #9aa3ad; text-align: right; }
+#countdown .qnext { margin-top: 6px; color: #9aa3ad; font-size: 11px; }
+#countdown .cd-sub:empty { display: none; }

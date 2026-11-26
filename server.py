@@ -333,6 +333,7 @@ class Car:
         self.cp = [False, False, False]
         self.status = "boxed"   # track | pit_in | boxed | pit_out
         self.grid_hold = False  # parked on the starting grid, waiting for lights out
+        self.flying = False     # current lap began on track at speed (counts for qualifying)
         self.pit_u = 0.0
         self.pit_v = 0.0
         self.pit_blend = 0.0
@@ -513,7 +514,8 @@ class Car:
                 event("pit", "%s pit stop: %s → %s (%.1fs)" % (self.name, old, self.next_tyre, t), car=self.id)
         elif self.status == "boxed":
             self.pit_v = 0.0
-            held = time.time() < SIM.start_at   # grid start: everyone waits in their box for lights out
+            held = time.time() < SIM.start_at or (SIM.phase == "quali" and SIM.quali_cur != self.name)
+            # grid start: everyone waits in their box; single-car quali: only the car on its run may leave
             if not held:
                 self.box_timer -= dt
             if self.box_timer <= 0 and not held:
@@ -566,15 +568,15 @@ class Car:
                 best = self.best_lap is None or lt < self.best_lap
                 if best:
                     self.best_lap = lt
-                if SIM.phase == "quali" and self.name not in SIM.quali:
+                if SIM.phase == "quali" and SIM.quali_cur == self.name and self.name not in SIM.quali and self.flying:
                     SIM.quali[self.name] = lt
-                    self.ghost = True   # cool-down: stay out of the way of cars still on a flying lap
                     event("quali", "QUALI %s: %s" % (self.name, fmt_time(lt)), car=self.id)
                 event("lap", "%s lap %d — %s%s" % (self.name, self.laps, fmt_time(lt), " (PB)" if best else ""), car=self.id)
             elif all(self.cp):
                 self.laps += 1
                 event("lap", "%s lap %d" % (self.name, self.laps), car=self.id)
             self.lap_start = now
+            self.flying = self.status == "track"   # lap started at speed on track (not from the pit lane)
             self.cp = [False, False, False]
         elif prev_s < 0.2 * L and self.s > 0.8 * L:
             self.cp = [False, False, False]  # went backwards over the line
@@ -825,7 +827,11 @@ class Sim:
         self.start_at = 0.0     # wall-clock time of the next start (boxed / gridded cars wait until then)
         self.phase = "race"     # race | quali | grid
         self.quali = {}         # car name -> qualifying lap time
-        self.quali_end = 0.0    # sim time when qualifying closes even if someone has no time
+        self.quali_end = 0.0    # (unused since single-car quali)
+        self.quali_order = []   # single-car qualifying run order
+        self.quali_cur = None   # car currently on its qualifying run
+        self.quali_t0 = 0.0     # sim time that run started
+        self.quali_tried = set()
 
     def free_slot(self, name=None):
         """A car's permanent pit box: the one in SLOTS if it's free, otherwise a random free box
@@ -854,11 +860,33 @@ class Sim:
                 self._reset_car(c)
                 c.put_in_box(first=True, wait=0.0)
             self.quali = {}
+            self.quali_order = random.sample(sorted(self.cars), len(self.cars))
+            self.quali_cur = None
+            self.quali_tried = set()
             self.phase = "quali"
             self.start_at = at
             self.quali_end = self.t + 420.0 + max(0.0, at - time.time()) * self.speed
         save_stats()
-        event("quali", "QUALIFYING: everyone out at once, out-lap + one timed lap, grid in time order")
+        event("quali", "QUALIFYING: one car at a time, out-lap + one timed lap, grid in time order")
+
+    def quali_tick(self, cars):
+        """Single-car qualifying: one car at a time on an empty track (out-lap + one timed lap), then the next."""
+        cur = self.cars.get(self.quali_cur) if self.quali_cur else None
+        if cur is not None and cur.name not in self.quali and self.t - self.quali_t0 < 260.0:
+            return
+        if cur is not None and cur.status != "boxed":
+            cur.put_in_box(wait=0.0)
+        nxt = next((n for n in self.quali_order + sorted(self.cars) if n in self.cars and n not in self.quali_tried), None)
+        if nxt is None:
+            self.quali_cur = None
+            self.form_grid(cars)
+            return
+        self.quali_tried.add(nxt)
+        self.quali_cur = nxt
+        self.quali_t0 = self.t
+        car = self.cars[nxt]
+        car.box_timer = 0.0
+        event("quali", "QUALI: %s out on track (%d/%d)" % (nxt, len(self.quali_tried), len(self.cars)), car=car.id)
 
     def _reset_car(self, c):
         c.laps = 0
@@ -871,6 +899,7 @@ class Sim:
         c.pit_req = False
         c.next_tyre = "medium"
         c.grid_hold = False
+        c.flying = False
 
     def form_grid(self, cars):
         """Line everyone up behind the start line in qualifying order (2 wide, staggered) and hold them."""
@@ -1014,8 +1043,8 @@ class Sim:
                     for w in ready:
                         w.send(line)
 
-            if self.phase == "quali" and cars and (all(c.name in self.quali for c in cars) or self.t > self.quali_end):
-                self.form_grid(cars)
+            if self.phase == "quali" and time.time() >= self.start_at:
+                self.quali_tick(cars)
             if self.phase == "grid" and time.time() >= self.start_at:
                 self.phase = "race"
                 event("start", "LIGHTS OUT — race on!")
@@ -1134,7 +1163,8 @@ class Sim:
                 })
             sparks, self.sparks = self.sparks, []
             return {"t": round(self.t, 3), "paused": self.paused, "speed": self.speed, "rate": round(self.rate, 2), "start_at": self.start_at, "now": time.time(), "phase": self.phase,
-                    "quali": self.quali, "cars": out, "sparks": sparks}
+                    "quali": self.quali, "qcur": self.quali_cur, "qorder": self.quali_order,
+                    "qfly": bool(self.cars[self.quali_cur].flying) if self.quali_cur in self.cars else False, "cars": out, "sparks": sparks}
 
     def run(self):
         """Fixed-step physics at PHYS_HZ, run self.speed times faster than real time when the CPU allows.
@@ -1676,10 +1706,13 @@ def main():
     want = os.environ.get("PITWALL_QUALI", "").strip()
     if want and want != QUALI_ID[0]:
         QUALI_ID[0] = want
-        SIM.start_at = time.time() + 20      # hold everyone right away; qualifying starts once cars are loaded
+        q_at = os.environ.get("PITWALL_QUALI_AT", "").strip()
+        q_at = parse_when(q_at) if q_at else time.time() + 16
+        q_at = max(q_at, time.time() + 6)
+        SIM.start_at = q_at                  # hold everyone right away; qualifying starts at q_at
         def go():
             time.sleep(4)
-            SIM.start_quali(time.time() + 12)
+            SIM.start_quali(q_at)
         threading.Thread(target=go, daemon=True).start()
     host = os.environ.get("HOST", "127.0.0.1")
     srv = ThreadingHTTPServer((host, PORT), Handler)

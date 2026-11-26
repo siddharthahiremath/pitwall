@@ -448,14 +448,15 @@ function updateBoard(s) {
   }).join("");
   const teams = new Map();
   for (const c of s.cars) {
-    const t = teams.get(c.owner) || { owner: c.owner, color: c.color, laps: 0, best: null };
+    const t = teams.get(c.owner) || { owner: c.owner, color: c.color, laps: 0, best: null, pts: 0 };
+    t.pts += s.cars.length - c.pos + 1;   // team score: each car scores how many places it is from last (last = 1)
     t.laps += c.laps; if (c.best != null && (t.best == null || c.best < t.best)) t.best = c.best;
     teams.set(c.owner, t);
   }
-  const tl = [...teams.values()].sort((a, b) => b.laps - a.laps);
-  $("#teams").innerHTML = tl.map((t, i) => `<div class="team"><span class="tp">${i + 1}</span><span class="sw" style="background:${t.color}"></span><b>${esc(t.owner)}</b><span class="tl">${t.laps} laps</span><span class="tb">${fmt(t.best)}</span></div>`).join("");
+  const tl = [...teams.values()].sort((a, b) => b.pts - a.pts || b.laps - a.laps);
+  $("#teams").innerHTML = tl.map((t, i) => `<div class="team"><span class="tp">${i + 1}</span><span class="sw" style="background:${t.color}"></span><b>${esc(t.owner)}</b><span class="tl">${t.pts} pts</span><span class="tb">${t.laps} laps</span></div>`).join("");
   $("#teams").hidden = !tl.length;
-  $("#lapinfo").textContent = tl.length ? "team = all 3 cars" : "";
+  $("#lapinfo").textContent = tl.length ? "team pts = places from last, all 3 cars" : "";
 }
 function setBar(id, frac, label) { $(id).style.width = clamp(frac, 0, 1) * 100 + "%"; }
 function updateSel(s) {
@@ -531,6 +532,13 @@ function onSnap(s) {
   if (selected != null && !s.cars.find((c) => c.id === selected)) selected = s.cars.length ? s.cars[0].id : null;
   if (s.start_at != null && s.now != null) { raceStart.at = s.start_at; raceStart.skew = s.now - Date.now() / 1000; }
   raceStart.phase = s.phase || "race"; raceStart.quali = s.quali || {}; raceStart.names = s.cars.map((c) => c.name);
+  raceStart.qcur = s.qcur || null; raceStart.qfly = !!s.qfly; raceStart.order = s.qorder || [];
+  const qc = s.qcur ? s.cars.find((c) => c.name === s.qcur) : null;
+  raceStart.qlt = qc ? qc.lt : null; raceStart.qst = qc ? qc.st : null;
+  if (s.phase === "quali" && s.qcur && s.qcur !== raceStart.lastQcur) {   // camera + onboard follow the car on its run
+    raceStart.lastQcur = s.qcur;
+    if (qc) { selected = qc.id; setToggle("follow", true); }
+  }
   if (now - lastBoard > 200) {
     lastBoard = now;
     updateBoard(s); updateSel(s);
@@ -790,6 +798,13 @@ function qualiList() {
   const rows = Object.entries(raceStart.quali).sort((a, b) => a[1] - b[1]);
   return rows.map(([n, t], i) => `P${i + 1} ${n} ${fmtLap(t)}`).join("  ·  ");
 }
+function timingSheet() {
+  const rows = Object.entries(raceStart.quali).sort((a, b) => a[1] - b[1]);
+  const pole = rows.length ? rows[0][1] : 0;
+  const list = rows.map(([n, t], i) => `<div class="qrow${n === raceStart.qcur ? " qnew" : ""}"><span>P${i + 1}</span><b>${esc(n)}</b><span>${fmtLap(t)}</span><span>${i ? "+" + (t - pole).toFixed(3) : ""}</span></div>`).join("");
+  const left = raceStart.order.filter((n) => raceStart.quali[n] == null && n !== raceStart.qcur);
+  return list + (left.length ? `<div class="qnext">still to run: ${left.map(esc).join(", ")}</div>` : "");
+}
 function fmtLap(t) { const m = Math.floor(t / 60), s = t - 60 * m; return m + ":" + s.toFixed(3).padStart(6, "0"); }
 function tickCountdown() {
   const el = document.getElementById("countdown");
@@ -798,11 +813,13 @@ function tickCountdown() {
   const sub = el.querySelector(".cd-sub");
   if (raceStart.phase === "quali" && left <= 0) {
     el.hidden = false; el.classList.remove("go");
-    const n = Object.keys(raceStart.quali).length, tot = raceStart.names.length;
-    el.querySelector(".cd-label").textContent = "QUALIFYING";
-    el.querySelector(".cd-time").textContent = `${n}/${tot} timed`;
+    const tot = raceStart.names.length, run = Math.min(tot, (raceStart.order.indexOf(raceStart.qcur) + 1) || Object.keys(raceStart.quali).length);
+    el.querySelector(".cd-label").textContent = `QUALIFYING · CAR ${run}/${tot} · ${raceStart.qcur || ""}`;
+    const done = raceStart.qcur && raceStart.quali[raceStart.qcur] != null;
+    el.querySelector(".cd-time").textContent = done ? fmtLap(raceStart.quali[raceStart.qcur])
+      : raceStart.qlt != null && raceStart.qst === "track" && raceStart.qfly ? fmtLap(raceStart.qlt) : "OUT LAP";
     el.querySelectorAll(".cd-lights i").forEach((d) => d.classList.remove("on"));
-    sub.textContent = n ? qualiList() : "out-lap, then one timed lap each — grid goes in time order";
+    sub.innerHTML = timingSheet();
     return;
   }
   sub.textContent = raceStart.phase === "grid" ? qualiList() || "grid in qualifying order"
