@@ -1120,7 +1120,10 @@ class Sim:
             self.t += dt
 
     def rank(self):
-        cars = sorted(self.cars.values(), key=lambda c: (-c.laps, -c.dist))
+        def progress(c):   # where the car really is: laps done + metres into the current lap
+            s = c.s - L if c.s > L / 2 and not c.cp[0] else c.s   # still before the line (grid / just backed over it)
+            return c.laps * L + s
+        cars = sorted(self.cars.values(), key=lambda c: -progress(c))
         for i, c in enumerate(cars):
             c.position = i + 1
         return cars
@@ -1710,9 +1713,15 @@ def main():
         q_at = parse_when(q_at) if q_at else time.time() + 16
         q_at = max(q_at, time.time() + 6)
         SIM.start_at = q_at                  # hold everyone right away; qualifying starts at q_at
+        seed = os.environ.get("PITWALL_QUALI_SEED", "").strip()   # "car:time,..." times already set this session
         def go():
             time.sleep(4)
             SIM.start_quali(q_at)
+            with SIM.lock:
+                for part in filter(None, seed.split(",")):
+                    n, _, t = part.partition(":")
+                    SIM.quali[n.strip()] = float(t)
+                    SIM.quali_tried.add(n.strip())
         threading.Thread(target=go, daemon=True).start()
     host = os.environ.get("HOST", "127.0.0.1")
     srv = ThreadingHTTPServer((host, PORT), Handler)

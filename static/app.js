@@ -438,25 +438,39 @@ function statusChips(c) {
 function updateBoard(s) {
   const tb = $("#board tbody");
   $("#board-empty").style.display = s.cars.length ? "none" : "block";
-  const bestOverall = Math.min(...s.cars.map((c) => c.best ?? 1e9));
-  tb.innerHTML = s.cars.map((c) => {
-    const chips = c.err ? '<span class="chip sm err">ERR</span>' : c.st !== "track" ? '<span class="chip sm pit">PIT</span>' : c.slide ? '<span class="chip sm slide">SLD</span>' : "";
+  const inQ = s.phase === "quali" || s.phase === "grid";   // qualifying: rank by quali time, not race position
+  const qt = inQ ? (s.quali || {}) : {};
+  let cars = s.cars, posOf = (c) => c.pos;
+  if (inQ) {
+    cars = [...s.cars].sort((a, b) => (qt[a.name] ?? 1e9) - (qt[b.name] ?? 1e9)
+      || (a.name === s.qcur ? -1 : b.name === s.qcur ? 1 : 0) || a.name.localeCompare(b.name));
+    const qp = new Map(cars.filter((c) => qt[c.name] != null).map((c, i) => [c.name, i + 1]));
+    posOf = (c) => qp.get(c.name) ?? null;
+  }
+  const bestOf = (c) => inQ ? qt[c.name] ?? null : c.best;
+  const bestOverall = Math.min(...s.cars.map((c) => bestOf(c) ?? 1e9));
+  tb.innerHTML = cars.map((c) => {
+    const best = bestOf(c), last = inQ ? qt[c.name] ?? null : c.last, pos = posOf(c);
+    const chips = c.err ? '<span class="chip sm err">ERR</span>' : inQ && c.name === s.qcur ? '<span class="chip sm slide">RUN</span>'
+      : c.st !== "track" ? '<span class="chip sm pit">PIT</span>' : c.slide ? '<span class="chip sm slide">SLD</span>' : "";
     return `<tr data-id="${c.id}" class="${c.id === selected ? "sel" : ""}">
-      <td>${c.pos}</td><td class="l name"><span class="sw" style="background:${c.color}"></span>${esc(c.name)}</td>
-      <td>${c.laps}</td><td class="c-last">${fmt(c.last)}</td><td class="best ${c.best != null && c.best === bestOverall ? "pb" : ""}">${fmt(c.best)}</td>
+      <td>${pos ?? "–"}</td><td class="l name"><span class="sw" style="background:${c.color}"></span>${esc(c.name)}</td>
+      <td>${inQ ? "–" : c.laps}</td><td class="c-last">${fmt(last)}</td><td class="best ${best != null && best === bestOverall ? "pb" : ""}">${fmt(best)}</td>
       <td>${tyreHTML(c)}</td><td>${chips}</td></tr>`;
   }).join("");
   const teams = new Map();
   for (const c of s.cars) {
     const t = teams.get(c.owner) || { owner: c.owner, color: c.color, laps: 0, best: null, pts: 0 };
-    t.pts += s.cars.length - c.pos + 1;   // team score: each car scores how many places it is from last (last = 1)
-    t.laps += c.laps; if (c.best != null && (t.best == null || c.best < t.best)) t.best = c.best;
+    const pos = posOf(c);
+    if (pos != null) t.pts += s.cars.length - pos + 1;   // team score: each car scores how many places it is from last (last = 1)
+    t.laps += c.laps;
+    const b = bestOf(c); if (b != null && (t.best == null || b < t.best)) t.best = b;
     teams.set(c.owner, t);
   }
-  const tl = [...teams.values()].sort((a, b) => b.pts - a.pts || b.laps - a.laps);
-  $("#teams").innerHTML = tl.map((t, i) => `<div class="team"><span class="tp">${i + 1}</span><span class="sw" style="background:${t.color}"></span><b>${esc(t.owner)}</b><span class="tl">${t.pts} pts</span><span class="tb">${t.laps} laps</span></div>`).join("");
+  const tl = [...teams.values()].sort((a, b) => b.pts - a.pts || (inQ ? (a.best ?? 1e9) - (b.best ?? 1e9) : b.laps - a.laps));
+  $("#teams").innerHTML = tl.map((t, i) => `<div class="team"><span class="tp">${i + 1}</span><span class="sw" style="background:${t.color}"></span><b>${esc(t.owner)}</b><span class="tl">${t.pts} pts</span><span class="tb">${inQ ? fmt(t.best) : t.laps + " laps"}</span></div>`).join("");
   $("#teams").hidden = !tl.length;
-  $("#lapinfo").textContent = tl.length ? "team pts = places from last, all 3 cars" : "";
+  $("#lapinfo").textContent = !tl.length ? "" : inQ ? "QUALIFYING · pts = places from last in quali order" : "team pts = places from last, all 3 cars";
 }
 function setBar(id, frac, label) { $(id).style.width = clamp(frac, 0, 1) * 100 + "%"; }
 function updateSel(s) {
