@@ -530,6 +530,7 @@ function onSnap(s) {
   if (selected == null && s.cars.length) selected = s.cars[0].id;
   if (selected != null && !s.cars.find((c) => c.id === selected)) selected = s.cars.length ? s.cars[0].id : null;
   if (s.start_at != null && s.now != null) { raceStart.at = s.start_at; raceStart.skew = s.now - Date.now() / 1000; }
+  raceStart.phase = s.phase || "race"; raceStart.quali = s.quali || {}; raceStart.names = s.cars.map((c) => c.name);
   if (now - lastBoard > 200) {
     lastBoard = now;
     updateBoard(s); updateSel(s);
@@ -784,11 +785,28 @@ $("#upload").addEventListener("change", async (e) => {
 boot();
 
 // ---- grid start countdown (server sends start_at + its clock, so the countdown is in server time) ----
-const raceStart = { at: 0, skew: 0 };
+const raceStart = { at: 0, skew: 0, phase: "race", quali: {}, names: [] };
+function qualiList() {
+  const rows = Object.entries(raceStart.quali).sort((a, b) => a[1] - b[1]);
+  return rows.map(([n, t], i) => `P${i + 1} ${n} ${fmtLap(t)}`).join("  ·  ");
+}
+function fmtLap(t) { const m = Math.floor(t / 60), s = t - 60 * m; return m + ":" + s.toFixed(3).padStart(6, "0"); }
 function tickCountdown() {
   const el = document.getElementById("countdown");
   if (!el) return;
   const left = raceStart.at - (Date.now() / 1000 + raceStart.skew);
+  const sub = el.querySelector(".cd-sub");
+  if (raceStart.phase === "quali" && left <= 0) {
+    el.hidden = false; el.classList.remove("go");
+    const n = Object.keys(raceStart.quali).length, tot = raceStart.names.length;
+    el.querySelector(".cd-label").textContent = "QUALIFYING";
+    el.querySelector(".cd-time").textContent = `${n}/${tot} timed`;
+    el.querySelectorAll(".cd-lights i").forEach((d) => d.classList.remove("on"));
+    sub.textContent = n ? qualiList() : "out-lap, then one timed lap each — grid goes in time order";
+    return;
+  }
+  sub.textContent = raceStart.phase === "grid" ? qualiList() || "grid in qualifying order"
+    : raceStart.phase === "quali" ? "qualifying: everyone leaves the pits together" : "every car leaves at the same moment";
   if (!raceStart.at || left < -3) { el.hidden = true; return; }
   el.hidden = false;
   const go = left <= 0;

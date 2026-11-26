@@ -332,6 +332,7 @@ class Car:
         self.best_lap = None
         self.cp = [False, False, False]
         self.status = "boxed"   # track | pit_in | boxed | pit_out
+        self.grid_hold = False  # parked on the starting grid, waiting for lights out
         self.pit_u = 0.0
         self.pit_v = 0.0
         self.pit_blend = 0.0
@@ -565,6 +566,10 @@ class Car:
                 best = self.best_lap is None or lt < self.best_lap
                 if best:
                     self.best_lap = lt
+                if SIM.phase == "quali" and self.name not in SIM.quali:
+                    SIM.quali[self.name] = lt
+                    self.ghost = True   # cool-down: stay out of the way of cars still on a flying lap
+                    event("quali", "QUALI %s: %s" % (self.name, fmt_time(lt)), car=self.id)
                 event("lap", "%s lap %d — %s%s" % (self.name, self.laps, fmt_time(lt), " (PB)" if best else ""), car=self.id)
             elif all(self.cp):
                 self.laps += 1
@@ -817,7 +822,10 @@ class Sim:
         self.tick = 0
         self.sparks = []
         self.rate = 1.0
-        self.start_at = 0.0     # wall-clock time of the next grid start (cars stay boxed until then)
+        self.start_at = 0.0     # wall-clock time of the next start (boxed / gridded cars wait until then)
+        self.phase = "race"     # race | quali | grid
+        self.quali = {}         # car name -> qualifying lap time
+        self.quali_end = 0.0    # sim time when qualifying closes even if someone has no time
 
     def free_slot(self, name=None):
         """A car's permanent pit box: the one in SLOTS if it's free, otherwise a random free box
@@ -835,6 +843,60 @@ class Sim:
             SLOTS[name] = slot
             save_json(SLOTS_FILE, SLOTS)
         return slot
+
+    def start_quali(self, at):
+        """Qualifying: reset everything, every car leaves its (permanent) box at `at`, does an out-lap and one
+        timed lap. Then the grid forms in time order and the race starts with everyone launching together."""
+        with self.lock:
+            STATS.clear()
+            for c in self.cars.values():
+                c.slot = self.free_slot(c.name) if SLOTS.get(c.name) is None else SLOTS[c.name]
+                self._reset_car(c)
+                c.put_in_box(first=True, wait=0.0)
+            self.quali = {}
+            self.phase = "quali"
+            self.start_at = at
+            self.quali_end = self.t + 420.0 + max(0.0, at - time.time()) * self.speed
+        save_stats()
+        event("quali", "QUALIFYING: everyone out at once, out-lap + one timed lap, grid in time order")
+
+    def _reset_car(self, c):
+        c.laps = 0
+        c.last_lap = c.best_lap = None
+        c.lap_start = None
+        c.pit_stops = 0
+        c.collisions = 0
+        c.dist = 0.0
+        c.cp = [False, False, False]
+        c.pit_req = False
+        c.next_tyre = "medium"
+        c.grid_hold = False
+
+    def form_grid(self, cars):
+        """Line everyone up behind the start line in qualifying order (2 wide, staggered) and hold them."""
+        order = sorted(cars, key=lambda c: (self.quali.get(c.name, 1e9), -c.dist))
+        STATS.clear()
+        for i, c in enumerate(order):
+            s0 = (L - 14.0 - 9.0 * i) % L
+            lat = 3.2 if i % 2 == 0 else -3.2
+            x, y, hd = track.point_at(s0, lat)
+            self._reset_car(c)
+            c.status = "track"
+            c.x, c.y, c.h = x, y, hd
+            c.vx = c.vy = c.omega = c.omega_ext = 0.0
+            c.throttle = c.brake = c.steer = 0.0
+            c.sliding = False
+            c.wear = 0.0
+            c.compound = "medium"
+            c.damage = 0.0
+            c.idx, c.s, c.lat = track.global_project(x, y)
+            c.update_track_info()
+            c.ghost = True
+            c.grid_hold = True
+        self.phase = "grid"
+        self.start_at = time.time() + 20.0
+        event("grid", "GRID: " + ", ".join("P%d %s %s" % (i + 1, c.name, fmt_time(self.quali[c.name]) if c.name in self.quali else "no time")
+                                           for i, c in enumerate(order)))
 
     def grid_start(self, at):
         """Reset every lap count, shuffle all cars into random permanent pit boxes, and hold them
@@ -951,7 +1013,17 @@ class Sim:
                     for w in ready:
                         w.send(line)
 
+            if self.phase == "quali" and cars and (all(c.name in self.quali for c in cars) or self.t > self.quali_end):
+                self.form_grid(cars)
+            if self.phase == "grid" and time.time() >= self.start_at:
+                self.phase = "race"
+                event("start", "LIGHTS OUT — race on!")
             for car in cars:
+                if car.grid_hold:
+                    if time.time() < self.start_at:
+                        car.vx = car.vy = car.omega = car.omega_ext = 0.0
+                        continue
+                    car.grid_hold = False
                 if car.status == "track":
                     prev_s = car.s
                     car.step_track(dt)
@@ -1060,7 +1132,8 @@ class Sim:
                     "lhit": "".join({"edge": "e", "wall": "w", "car": "c"}.get(k, "-") for k in c.lidar_hit),
                 })
             sparks, self.sparks = self.sparks, []
-            return {"t": round(self.t, 3), "paused": self.paused, "speed": self.speed, "rate": round(self.rate, 2), "start_at": self.start_at, "now": time.time(), "cars": out, "sparks": sparks}
+            return {"t": round(self.t, 3), "paused": self.paused, "speed": self.speed, "rate": round(self.rate, 2), "start_at": self.start_at, "now": time.time(), "phase": self.phase,
+                    "quali": self.quali, "cars": out, "sparks": sparks}
 
     def run(self):
         """Fixed-step physics at PHYS_HZ, run self.speed times faster than real time when the CPU allows.
@@ -1129,7 +1202,7 @@ def save_live():
             d["lap_age"] = (SIM.t - c.lap_start) if c.lap_start is not None else None
             cars[c.name] = d
     save_json(LIVE_FILE, {"saved_at": time.time(), "cars": cars, "speed": SIM.speed, "paused": SIM.paused,
-                          "start_at": SIM.start_at, "grid_id": GRID_ID[0]})
+                          "start_at": SIM.start_at, "grid_id": GRID_ID[0], "quali_id": QUALI_ID[0]})
 
 
 def restore_live(car):
@@ -1420,6 +1493,8 @@ class Handler(BaseHTTPRequestHandler):
                     if car:
                         car.put_in_box(wait=2.0)
                         event("tow", "%s reset to pit box" % car.name, car=car.id)
+                elif act == "quali":
+                    threading.Thread(target=SIM.start_quali, args=(time.time() + 10,), daemon=True).start()
                 elif act == "grid_start":
                     at = parse_when(data.get("at", time.time() + 60))
                     threading.Thread(target=SIM.grid_start, args=(at,), daemon=True).start()
@@ -1530,7 +1605,8 @@ ACCOUNTS = {}
 SESSIONS = {}
 LIVE = {}
 SLOTS = {}
-GRID_ID = [""]   # PITWALL_GRID_START value already applied (so a redeploy doesn't reset laps again)
+GRID_ID = [""]
+QUALI_ID = [""]   # PITWALL_GRID_START value already applied (so a redeploy doesn't reset laps again)
 
 
 def parse_when(v):
@@ -1561,6 +1637,7 @@ def main():
     live = load_json(LIVE_FILE, {})
     SIM.start_at = float(live.get("start_at", 0) or 0)
     GRID_ID[0] = live.get("grid_id", "")
+    QUALI_ID[0] = live.get("quali_id", "")
     if time.time() - live.get("saved_at", 0) < 600:        # only resume positions after a quick restart
         LIVE.update(live.get("cars", {}))
         SIM.speed = clamp(num(live.get("speed", 1.0), 1.0), MIN_SPEED, MAX_SPEED)
@@ -1577,6 +1654,14 @@ def main():
         GRID_ID[0] = want
         SIM.start_at = parse_when(want)    # hold everyone right away; laps reset once cars are loaded
         threading.Thread(target=pending_grid_start, args=(SIM.start_at,), daemon=True).start()
+    want = os.environ.get("PITWALL_QUALI", "").strip()
+    if want and want != QUALI_ID[0]:
+        QUALI_ID[0] = want
+        SIM.start_at = time.time() + 20      # hold everyone right away; qualifying starts once cars are loaded
+        def go():
+            time.sleep(4)
+            SIM.start_quali(time.time() + 12)
+        threading.Thread(target=go, daemon=True).start()
     host = os.environ.get("HOST", "127.0.0.1")
     srv = ThreadingHTTPServer((host, PORT), Handler)
     srv.daemon_threads = True

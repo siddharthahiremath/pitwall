@@ -194,5 +194,5 @@ button.link:hover { background: none; color: var(--text); }
 #countdown .cd-lights { display: flex; gap: 8px; justify-content: center; }
 #countdown .cd-lights i { width: 16px; height: 16px; border-radius: 50%; background: #2a2f35; border: 1px solid #3a4048; }
 #countdown .cd-lights i.on { background: #ff2a2a; border-color: #ff6b6b; box-shadow: 0 0 10px #ff2a2a; }
-#countdown .cd-sub { margin-top: 8px; font-size: 11px; color: #9aa3ad; }
+#countdown .cd-sub { margin-top: 8px; font-size: 11px; color: #9aa3ad; max-width: 560px; line-height: 1.5; }
 @media (max-width: 600px) { #countdown { top: 8px; padding: 8px 14px 10px; min-width: 0; } #countdown .cd-time { font-size: 28px; } }
