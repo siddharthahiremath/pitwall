@@ -864,33 +864,41 @@ class Sim:
                 self._reset_car(c)
                 c.put_in_box(first=True, wait=0.0)
             self.quali = {}
-            self.quali_order = random.sample(sorted(self.cars), len(self.cars))
+            owners = sorted({c.owner for c in self.cars.values()})
+            self.quali_order = random.sample(owners, len(owners))   # one run per PLAYER; their time counts for all 3 cars
             self.quali_cur = None
             self.quali_tried = set()
             self.phase = "quali"
             self.start_at = at
             self.quali_end = self.t + 420.0 + max(0.0, at - time.time()) * self.speed
         save_stats()
-        event("quali", "QUALIFYING: one car at a time, out-lap + one timed lap, grid in time order")
+        event("quali", "QUALIFYING: one car per player, out-lap + one flying lap; that time sets all 3 of their cars")
 
     def quali_tick(self, cars):
         """Single-car qualifying: one car at a time on an empty track (out-lap + one timed lap), then the next."""
         cur = self.cars.get(self.quali_cur) if self.quali_cur else None
         if cur is not None and cur.name not in self.quali and self.t - self.quali_t0 < 260.0:
             return
-        if cur is not None and cur.status != "boxed":
-            cur.put_in_box(wait=0.0)
-        nxt = next((n for n in self.quali_order + sorted(self.cars) if n in self.cars and n not in self.quali_tried), None)
+        if cur is not None:
+            if cur.status != "boxed":
+                cur.put_in_box(wait=0.0)
+            if cur.name in self.quali:                       # same script on all 3 cars -> same time for all 3
+                for c in self.team(cur.owner):
+                    self.quali.setdefault(c.name, self.quali[cur.name])
+        owners = {c.owner for c in self.cars.values()}
+        nxt = next((o for o in self.quali_order + sorted(owners) if o in owners and o not in self.quali_tried), None)
         if nxt is None:
             self.quali_cur = None
             self.form_grid(cars)
             return
+        if nxt not in self.quali_order:
+            self.quali_order.append(nxt)                     # joined during qualifying
         self.quali_tried.add(nxt)
-        self.quali_cur = nxt
+        car = self.team(nxt)[0]
+        self.quali_cur = car.name
         self.quali_t0 = self.t
-        car = self.cars[nxt]
         car.box_timer = 0.0
-        event("quali", "QUALI: %s out on track (%d/%d)" % (nxt, len(self.quali_tried), len(self.cars)), car=car.id)
+        event("quali", "QUALI: %s out on track for %s (%d/%d)" % (car.name, nxt, len(self.quali_tried), len(owners)), car=car.id)
 
     def _reset_car(self, c):
         c.laps = 0
@@ -907,7 +915,7 @@ class Sim:
 
     def form_grid(self, cars):
         """Line everyone up behind the start line in qualifying order (2 wide, staggered) and hold them."""
-        order = sorted(cars, key=lambda c: (self.quali.get(c.name, 1e9), -c.dist))
+        order = sorted(cars, key=lambda c: (self.quali.get(c.name, 1e9), c.owner, c.num))
         STATS.clear()
         for i, c in enumerate(order):
             s0 = (L - 14.0 - 9.0 * i) % L
@@ -928,7 +936,7 @@ class Sim:
             c.grid_hold = True
             c.dist = -(L - s0) if s0 > L / 2 else s0   # distance from the start line, so standings start in grid order
         self.phase = "grid"
-        self.start_at = time.time() + 20.0
+        self.start_at = math.ceil((time.time() + 45.0) / 300.0) * 300.0   # lights out on the next 5-minute mark
         event("grid", "GRID: " + ", ".join("P%d %s %s" % (i + 1, c.name, fmt_time(self.quali[c.name]) if c.name in self.quali else "no time")
                                            for i, c in enumerate(order)))
 
@@ -1819,14 +1827,14 @@ def main():
         threading.Thread(target=apply_fix, daemon=True).start()
     want = os.environ.get("PITWALL_QUALI", "").strip()
     if want and want != QUALI_ID[0]:
-        QUALI_ID[0] = want
         q_at = os.environ.get("PITWALL_QUALI_AT", "").strip()
         q_at = parse_when(q_at) if q_at else time.time() + 16
         q_at = max(q_at, time.time() + 6)
-        SIM.start_at = q_at                  # hold everyone right away; qualifying starts at q_at
         seed = os.environ.get("PITWALL_QUALI_SEED", "").strip()   # "car:time,..." times already set this session
         def go():
-            time.sleep(4)
+            time.sleep(max(4.0, q_at - 120 - time.time()))   # race runs on until 2 min before; then boxes + countdown
+            QUALI_ID[0] = want
+            SIM.start_at = q_at
             SIM.start_quali(q_at)
             with SIM.lock:
                 for part in filter(None, seed.split(",")):

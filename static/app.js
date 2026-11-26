@@ -812,11 +812,18 @@ function qualiList() {
   const rows = Object.entries(raceStart.quali).sort((a, b) => a[1] - b[1]);
   return rows.map(([n, t], i) => `P${i + 1} ${n} ${fmtLap(t)}`).join("  ·  ");
 }
+const ownerOf = (n) => String(n || "").split("#")[0];
+function playerTimes() {   // one run per player; their time counts for all 3 of their cars
+  const best = new Map();
+  for (const [n, t] of Object.entries(raceStart.quali)) { const o = ownerOf(n); if (!best.has(o) || t < best.get(o)) best.set(o, t); }
+  return [...best.entries()].sort((a, b) => a[1] - b[1]);
+}
 function timingSheet() {
-  const rows = Object.entries(raceStart.quali).sort((a, b) => a[1] - b[1]);
-  const pole = rows.length ? rows[0][1] : 0;
-  const list = rows.map(([n, t], i) => `<div class="qrow${n === raceStart.qcur ? " qnew" : ""}"><span>P${i + 1}</span><b>${esc(n)}</b><span>${fmtLap(t)}</span><span>${i ? "+" + (t - pole).toFixed(3) : ""}</span></div>`).join("");
-  const left = raceStart.order.filter((n) => raceStart.quali[n] == null && n !== raceStart.qcur);
+  const rows = playerTimes();
+  const pole = rows.length ? rows[0][1] : 0, cur = ownerOf(raceStart.qcur);
+  const list = rows.map(([o, t], i) => `<div class="qrow${o === cur ? " qnew" : ""}"><span>P${i + 1}</span><b>${esc(o)} <small>×3</small></b><span>${fmtLap(t)}</span><span>${i ? "+" + (t - pole).toFixed(3) : ""}</span></div>`).join("");
+  const done = new Set(rows.map(([o]) => o));
+  const left = raceStart.order.filter((o) => !done.has(o) && o !== cur);
   return list + (left.length ? `<div class="qnext">still to run: ${left.map(esc).join(", ")}</div>` : "");
 }
 function fmtLap(t) { const m = Math.floor(t / 60), s = t - 60 * m; return m + ":" + s.toFixed(3).padStart(6, "0"); }
@@ -827,8 +834,8 @@ function tickCountdown() {
   const sub = el.querySelector(".cd-sub");
   if (raceStart.phase === "quali" && left <= 0) {
     el.hidden = false; el.classList.remove("go");
-    const tot = raceStart.names.length, run = Math.min(tot, (raceStart.order.indexOf(raceStart.qcur) + 1) || Object.keys(raceStart.quali).length);
-    el.querySelector(".cd-label").textContent = `QUALIFYING · CAR ${run}/${tot} · ${raceStart.qcur || ""}`;
+    const tot = new Set(raceStart.names.map(ownerOf)).size, run = Math.min(tot, (raceStart.order.indexOf(ownerOf(raceStart.qcur)) + 1) || playerTimes().length);
+    el.querySelector(".cd-label").textContent = `QUALIFYING · ${run}/${tot} · ${ownerOf(raceStart.qcur).toUpperCase()} (${raceStart.qcur || ""})`;
     const done = raceStart.qcur && raceStart.quali[raceStart.qcur] != null;
     el.querySelector(".cd-time").textContent = done ? fmtLap(raceStart.quali[raceStart.qcur])
       : raceStart.qlt != null && raceStart.qst === "track" && raceStart.qfly ? fmtLap(raceStart.qlt) : "OUT LAP";
@@ -837,14 +844,14 @@ function tickCountdown() {
     return;
   }
   sub.textContent = raceStart.phase === "grid" ? qualiList() || "grid in qualifying order"
-    : raceStart.phase === "quali" ? "qualifying: everyone leaves the pits together" : "every car leaves at the same moment";
+    : raceStart.phase === "quali" ? "QUALIFYING: one out-lap + one flying lap per player · their time sets all 3 cars" : "every car leaves at the same moment";
   if (!raceStart.at || left < -3) { el.hidden = true; return; }
   el.hidden = false;
   const go = left <= 0;
   el.classList.toggle("go", go);
   const t = Math.max(0, Math.ceil(left));
   const h = Math.floor(t / 3600), m = Math.floor(t / 60) % 60, sec = t % 60;
-  el.querySelector(".cd-label").textContent = go ? "" : "LIGHTS OUT IN";
+  el.querySelector(".cd-label").textContent = go ? "" : raceStart.phase === "quali" ? "QUALIFYING STARTS IN" : "LIGHTS OUT IN";
   el.querySelector(".cd-time").textContent = go ? "GO GO GO" :
     (h ? h + ":" + String(m).padStart(2, "0") : m) + ":" + String(sec).padStart(2, "0");
   const lit = go ? 0 : left <= 5 ? Math.min(5, 6 - Math.ceil(left)) : 0;   // F1-style: one light per second for the last 5 s
