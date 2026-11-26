@@ -203,3 +203,21 @@ button.link:hover { background: none; color: var(--text); }
 #countdown .qrow span:nth-child(4) { color: #9aa3ad; text-align: right; }
 #countdown .qnext { margin-top: 6px; color: #9aa3ad; font-size: 11px; }
 #countdown .cd-sub:empty { display: none; }
+
+/* ---------- 3D view */
+#world3d { position: absolute; inset: 0; width: 100%; height: 100%; display: block; cursor: grab; touch-action: none; }
+#cams3d { position: absolute; left: 50%; bottom: 12px; transform: translateX(-50%); display: flex; gap: 4px; align-items: center;
+  background: rgba(10, 12, 16, .72); border: 1px solid rgba(255,255,255,.1); border-radius: 10px; padding: 4px; backdrop-filter: blur(6px); z-index: 3; flex-wrap: wrap; justify-content: center; max-width: calc(100% - 24px); }
+#cams3d button { background: transparent; border: 0; color: #c6cede; font: 600 12px/1 inherit; padding: 7px 10px; border-radius: 7px; cursor: pointer; }
+#cams3d button.on { background: #e8eaef; color: #111; }
+#cams3d .k { color: #8a93a6; font-size: 11px; padding: 0 8px; }
+#hud3d { position: absolute; left: 14px; bottom: 64px; color: #fff; pointer-events: none; text-shadow: 0 1px 3px rgba(0,0,0,.7); z-index: 3; font-variant-numeric: tabular-nums; }
+#hud3d .h-name { font-weight: 700; font-size: 14px; display: flex; align-items: center; gap: 6px; }
+#hud3d .h-name i { width: 4px; height: 14px; border-radius: 2px; display: inline-block; }
+#hud3d .h-speed { font-size: 44px; font-weight: 800; line-height: 1; margin: 4px 0; }
+#hud3d .h-speed small { font-size: 13px; font-weight: 600; margin-left: 4px; opacity: .8; }
+#hud3d .h-bars { display: flex; gap: 8px; font-size: 10px; font-weight: 700; }
+#hud3d .h-bars span { position: relative; width: 80px; height: 14px; background: rgba(0,0,0,.45); border-radius: 3px; padding-left: 4px; line-height: 14px; overflow: hidden; }
+#hud3d .h-bars b { position: absolute; left: 0; top: 0; bottom: 0; background: rgba(60, 220, 110, .65); z-index: -1; }
+#hud3d .h-bars .brk b { background: rgba(255, 60, 60, .7); }
+#hud3d .h-row { font-size: 12px; margin-top: 6px; font-weight: 600; }
