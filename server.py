@@ -27,7 +27,7 @@ import numpy as np
 from track import Track, HALF_WIDTH, KERB, WALL, PIT_SPEED
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
-DATA_DIR = os.path.join(ROOT, "data")            # never committed: accounts, sessions, scripts, stats
+DATA_DIR = os.environ.get("PITWALL_DATA") or os.path.join(ROOT, "data")   # never committed: accounts, sessions, scripts, stats
 BOT_DIR = os.path.join(DATA_DIR, "bots")
 ACCOUNTS_FILE = os.path.join(DATA_DIR, "accounts.json")
 SESSIONS_FILE = os.path.join(DATA_DIR, "sessions.json")
@@ -161,12 +161,20 @@ class Worker:
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 cwd=ROOT, text=True, bufsize=1,
                 env={"PATH": "/usr/bin:/bin", "PYTHONDONTWRITEBYTECODE": "1", "PYTHONUNBUFFERED": "1",
-                     "HOME": "/var/empty", "OPENBLAS_NUM_THREADS": "1", "OMP_NUM_THREADS": "1"})
+                     "HOME": "/var/empty", "OPENBLAS_NUM_THREADS": "1", "OMP_NUM_THREADS": "1",
+                     "PITWALL_GUARD": "1" if _linux_bot_user() else "0"},
+                **bot_popen_extra())
         except Exception as e:
             self.error = "failed to start: %s" % e
             return
         init = {"type": "init", "track": GEOM, "params": P, "tyres": {k: {"grip": v[0], "wear_rate": v[1]} for k, v in TYRES.items()},
                 "car_id": self.car.id, "name": self.car.name}
+        if _linux_bot_user():   # the bot user can't read the data volume, so send the code itself
+            try:
+                with open(self.car.path) as f:
+                    init["code"] = f.read()
+            except Exception as e:
+                init["code"] = "raise RuntimeError(%r)" % ("could not read script: %s" % e)
         try:
             self.proc.stdin.write(json.dumps(init) + "\n")
             self.proc.stdin.flush()
@@ -247,8 +255,8 @@ class Worker:
 
 
 def bot_command(path):
-    """Bots run in a macOS sandbox: no network, no file writes, can only read Python itself,
-    this app's code, and their own script (not other people's scripts, not your home folder)."""
+    """macOS: bots run under sandbox-exec (no network, no file writes, can't read your home folder
+    or other people's scripts). Linux (Railway): see bot_popen_extra()."""
     cmd = [sys.executable, "-u", os.path.join(ROOT, "runner.py"), path]
     if sys.platform == "darwin" and os.path.exists("/usr/bin/sandbox-exec") and os.environ.get("PITWALL_NO_SANDBOX") != "1":
         home = os.path.expanduser("~")
@@ -256,6 +264,34 @@ def bot_command(path):
                 "-D", "PYHOME2=" + sys.prefix, "-D", "APPDIR=" + ROOT, "-D", "DATADIR=" + DATA_DIR,
                 "-D", "BOTFILE=" + path] + cmd
     return cmd
+
+
+def _linux_bot_user():
+    if sys.platform != "linux" or os.environ.get("PITWALL_NO_SANDBOX") == "1" or os.geteuid() != 0:
+        return None
+    try:
+        import pwd
+        return pwd.getpwnam("bot")
+    except (ImportError, KeyError):
+        return None
+
+
+def _bot_limits():
+    import resource
+    resource.setrlimit(resource.RLIMIT_FSIZE, (0, 0))              # can't write files
+    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+    resource.setrlimit(resource.RLIMIT_AS, (1536 << 20, 1536 << 20))  # 1.5 GB of address space
+    os.setsid()
+
+
+def bot_popen_extra():
+    """Linux: bots run as an unprivileged 'bot' user that can't read the data volume (accounts,
+    other people's scripts), with no file writes, and runner.py's audit hook blocks sockets,
+    subprocesses and ctypes. The script itself is handed over in the init message."""
+    u = _linux_bot_user()
+    if not u:
+        return {}
+    return {"user": u.pw_uid, "group": u.pw_gid, "extra_groups": [], "preexec_fn": _bot_limits}
 
 
 # ---------------- car ----------------
@@ -1035,7 +1071,12 @@ LIVE_FIELDS = ("x", "y", "h", "vx", "vy", "status", "pit_u", "pit_v", "pit_blend
                "wear", "compound", "next_tyre", "damage", "ghost", "slot", "cp", "drs", "dist")
 
 
+FROZEN = threading.Event()   # set while an import replaces the data files; nothing may overwrite them
+
+
 def save_live():
+    if FROZEN.is_set():
+        return
     with SIM.lock:
         cars = {}
         for c in SIM.cars.values():
@@ -1066,6 +1107,8 @@ def restore_live(car):
 
 
 def save_stats():
+    if FROZEN.is_set():
+        return
     with SIM.lock:
         for c in SIM.cars.values():
             STATS[c.name] = {"laps": c.laps, "best": c.best_lap, "last": c.last_lap, "stops": c.pit_stops,
@@ -1230,8 +1273,43 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, f.read(), ctype + ("; charset=utf-8" if ctype.startswith(("text", "application/j")) else ""))
         self._send(404, {"error": "not found"})
 
+    def _import(self):
+        """One-time move of a whole PITWALL data folder onto this server (e.g. Mac -> Railway).
+        Only works when PITWALL_IMPORT_TOKEN is set in this server's environment."""
+        want = os.environ.get("PITWALL_IMPORT_TOKEN", "")
+        got = self.headers.get("X-Import-Token", "")
+        if len(want) < 24 or not hmac.compare_digest(want, got):
+            return self._send(403, {"error": "import disabled"})
+        n = int(self.headers.get("Content-Length", 0) or 0)
+        if n > 20_000_000:
+            return self._send(413, {"error": "too large"})
+        try:
+            files = json.loads(self.rfile.read(n).decode())["files"]
+            ok = {}
+            for name, b64 in files.items():
+                if not (name in ("accounts.json", "sessions.json", "stats.json", "live.json")
+                        or (name.startswith("bots/") and name.count("/") == 1 and name.endswith(".py")
+                            and all(ch.isalnum() or ch in "_-." for ch in name[5:]))):
+                    return self._send(400, {"error": "unexpected file %s" % name})
+                ok[name] = base64.b64decode(b64)
+        except Exception as e:
+            return self._send(400, {"error": "bad import: %s" % e})
+        FROZEN.set()
+        time.sleep(0.3)   # let any in-flight save finish
+        for name, raw in ok.items():
+            fp = os.path.join(DATA_DIR, name)
+            os.makedirs(os.path.dirname(fp), exist_ok=True)
+            with open(fp + ".tmp", "wb") as f:
+                f.write(raw)
+            os.replace(fp + ".tmp", fp)
+        self._send(200, {"ok": True, "files": sorted(ok), "restarting": True})
+        print("import: %d files written, restarting" % len(ok), flush=True)
+        threading.Timer(0.5, lambda: os._exit(3)).start()   # the host restarts us and we load the new data
+
     def do_POST(self):
         path = urlparse(self.path).path
+        if path == "/api/admin/import":
+            return self._import()
         try:
             data = self._json()
         except Exception as e:
@@ -1406,6 +1484,8 @@ LIVE = {}
 
 def main():
     os.makedirs(BOT_DIR, exist_ok=True)
+    if _linux_bot_user():
+        os.chmod(DATA_DIR, 0o700)   # bots run as another user and must not read this
     ACCOUNTS.update(load_json(ACCOUNTS_FILE, {}))
     STATS.update(load_json(STATS_FILE, {}))
     for k in [k for k in STATS if "#" not in k]:          # stats from the one-car-per-player days -> car #1

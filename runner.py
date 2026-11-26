@@ -7,6 +7,7 @@ Protocol (JSON lines over stdin/stdout):
 """
 import io
 import json
+import os
 import sys
 import time
 import traceback
@@ -20,6 +21,27 @@ def out(obj):
     proto.flush()
 
 
+_BLOCK = ("socket.", "subprocess.", "os.system", "os.exec", "os.spawn", "os.posix_spawn", "os.fork",
+          "os.forkpty", "pty.", "ctypes.", "os.kill", "os.killpg", "signal.", "sys.addaudithook",
+          "os.chmod", "os.chown", "os.remove", "os.rename", "os.rmdir", "os.mkdir", "os.symlink", "os.link",
+          "os.truncate", "shutil.", "urllib.", "http.", "ftplib.", "smtplib.", "webbrowser.", "winreg.")
+_WRITE = os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_APPEND | os.O_TRUNC
+
+
+def install_guard():
+    """Linux sandbox layer 2 (layer 1: an unprivileged user that can't read app data, no file writes).
+    Python audit hooks can't be removed once installed; this blocks network, processes and ctypes."""
+    def hook(event, args):
+        if event.startswith(_BLOCK):
+            raise PermissionError("PITWALL sandbox: %s is not allowed in bot scripts" % event)
+        if event == "open" and len(args) >= 3:
+            mode, flags = args[1], args[2]
+            if (isinstance(mode, str) and any(ch in mode for ch in "wax+")) or (isinstance(flags, int) and flags & _WRITE):
+                if args[0] != "/dev/null":
+                    raise PermissionError("PITWALL sandbox: writing files is not allowed")
+    sys.addaudithook(hook)
+
+
 def main():
     line = sys.stdin.readline()
     if not line:
@@ -29,12 +51,20 @@ def main():
     params = init["params"]
     tyres = init.get("tyres")
 
+    if os.environ.get("PITWALL_GUARD") == "1":
+        import botview  # noqa: F401  (numpy etc. load before the guard goes up)
+        install_guard()
+
     buf = io.StringIO()
     sys.stdout = buf
     g = {"__name__": "bot", "__file__": path}
     try:
-        with open(path) as f:
-            code = compile(f.read(), path, "exec")
+        if "code" in init:
+            src = init["code"]
+        else:
+            with open(path) as f:
+                src = f.read()
+        code = compile(src, path, "exec")
         exec(code, g)
         if "drive" not in g:
             raise RuntimeError("your script must define a function drive(state) -> dict")

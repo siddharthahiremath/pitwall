@@ -90,3 +90,10 @@ python3 server.py           # http://localhost:8765
 
 Files: `server.py` (physics, collisions, lidar, pit autopilot, HTTP/SSE API), `runner.py` + `botview.py` (per-bot
 process and its view of the world), `track.py` (circuit geometry), `static/` (the web UI), `sandbox.sb` (bot sandbox profile).
+
+## Hosting on Railway (always on)
+
+The repo has a `Dockerfile` and `railway.json`. On Railway: create a service from this repo (or `railway up`),
+add a **volume mounted at `/data`**, and generate a domain. Then create accounts with
+`railway ssh -- python3 manage.py init`. On Linux, bot scripts run as an unprivileged user that can't read
+the data volume, can't write files, and have network, subprocesses and ctypes blocked by a Python audit hook.

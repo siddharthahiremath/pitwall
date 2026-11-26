@@ -1,0 +1,10 @@
+data/
+fast_bots/
+tools/
+static/config.js
+static/.vercel/
+.vercel/
+.git/
+.claude/
+__pycache__/
+*.pyc
