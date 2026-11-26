@@ -39,6 +39,8 @@ MAX_CODE = 200_000
 CARS_PER_PLAYER = 3
 MIN_SPEED, MAX_SPEED = 0.1, 50.0   # admin sim-speed range
 SLOTS_FILE = os.path.join(DATA_DIR, "slots.json")   # each car's permanent (random) pit box
+REPLAY_DIR = os.path.join(DATA_DIR, "replay")      # full race recording: telemetry frames, events, cars, track
+SCRIPT_ARCHIVE = os.path.join(DATA_DIR, "scripts")  # every version of every uploaded bot script
 LIVE_FILE = os.path.join(DATA_DIR, "live.json")   # car positions, so a restart resumes mid-race
 PORT = int(os.environ.get("PORT", "8765"))
 
@@ -123,6 +125,7 @@ def tyre_grip(comp, wear):
 
 # ---------------- event log ----------------
 EVENTS = []
+EV_LOG = []   # every event, waiting for the recorder to append it to disk
 EV_LOCK = threading.Lock()
 EV_ID = [0]
 
@@ -132,6 +135,7 @@ def event(kind, text, **extra):
         EV_ID[0] += 1
         EVENTS.append({"id": EV_ID[0], "kind": kind, "text": text, "t": round(SIM.t, 2) if "SIM" in globals() else 0, **extra})
         del EVENTS[:-200]
+        EV_LOG.append(dict(EVENTS[-1], w=round(time.time(), 2)))
 
 
 # ---------------- bot worker (one subprocess per car) ----------------
@@ -1310,14 +1314,90 @@ def bot_path(user):
     return os.path.join(BOT_DIR, user + ".py")
 
 
+def archive_script(user, code):
+    """Keep every distinct version of a player's script (data/scripts/<user>/<utc>-<hash>.py)."""
+    try:
+        raw = code.encode() if isinstance(code, str) else code
+        h = hashlib.sha256(raw).hexdigest()[:10]
+        d = os.path.join(SCRIPT_ARCHIVE, user)
+        os.makedirs(d, exist_ok=True)
+        if any(f.endswith("-%s.py" % h) for f in os.listdir(d)):
+            return
+        with open(os.path.join(d, "%s-%s.py" % (time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()), h)), "wb") as f:
+            f.write(raw)
+    except Exception:
+        traceback.print_exc()
+
+
 def deploy_script(user, code):
     """Write the user's script and swap it into their car immediately (first upload creates the car)."""
+    archive_script(user, code)
     fp = bot_path(user)
     with open(fp, "w") as f:
         f.write(code)
     if SIM.team(user):
         SIM.reload_team(user)
     SIM.add_team(user, fp)   # tops the team up to CARS_PER_PLAYER (no-op once they have all of them)
+
+
+# ---------------- recorder (everything needed to replay a race later) ----------------
+FRAME_FIELDS = ["id", "x", "y", "h", "v", "s", "lat", "laps", "pos", "st", "tyre", "wear", "dmg", "drs",
+                "thr", "brk", "str", "slide", "lt", "last", "best", "stops", "pitreq", "next"]
+
+
+def recorder():
+    """10 Hz telemetry of every car + every event, appended to gzip files on the volume.
+    replay/frames-<utc date>.jsonl.gz: line 1 of each file is {"fields": [...]}; then one frame per line
+    {"w": wall time, "t": sim time, "ph": phase, "c": [[...FRAME_FIELDS], ...]}.
+    replay/events.jsonl: every race event with wall time. replay/cars.jsonl: car identity changes."""
+    import gzip
+    os.makedirs(REPLAY_DIR, exist_ok=True)
+    try:
+        save_json(os.path.join(REPLAY_DIR, "track.json"), GEOM)
+    except Exception:
+        traceback.print_exc()
+    buf, last_flush, ident = [], time.time(), {}
+    while True:
+        try:
+            time.sleep(0.1)
+            if FROZEN.is_set():
+                continue
+            with SIM.lock:
+                rows, idn = [], {}
+                SIM.rank()
+                for c in sorted(SIM.cars.values(), key=lambda c: c.id):
+                    idn[c.id] = (c.name, c.owner, c.num, c.color, c.slot)
+                    rows.append([c.id, round(c.x, 2), round(c.y, 2), round(c.h, 3), round(c.speed, 2), round(c.s, 1),
+                                 round(c.lat, 2), c.laps, getattr(c, "position", None), c.status, c.compound,
+                                 round(c.wear, 4), round(c.damage, 3), round(c.drs, 2), round(c.throttle, 2),
+                                 round(c.brake, 2), round(c.steer, 3), c.sliding,
+                                 round(SIM.t - c.lap_start, 2) if c.lap_start is not None else None,
+                                 c.last_lap and round(c.last_lap, 3), c.best_lap and round(c.best_lap, 3),
+                                 c.pit_stops, c.pit_req, c.next_tyre])
+                frame = {"w": round(time.time(), 2), "t": round(SIM.t, 2), "ph": SIM.phase,
+                         "paused": SIM.paused, "speed": SIM.speed, "c": rows}
+            if idn != ident:
+                with open(os.path.join(REPLAY_DIR, "cars.jsonl"), "a") as f:
+                    f.write(json.dumps({"w": frame["w"], "cars": {i: dict(zip(("name", "owner", "num", "color", "slot"), v))
+                                                                  for i, v in idn.items()}}) + "\n")
+                ident = idn
+            buf.append(json.dumps(frame, separators=(",", ":")))
+            if time.time() - last_flush >= 5:
+                last_flush = time.time()
+                fp = os.path.join(REPLAY_DIR, "frames-%s.jsonl.gz" % time.strftime("%Y%m%d", time.gmtime()))
+                head = [] if os.path.exists(fp) else [json.dumps({"fields": FRAME_FIELDS})]
+                with gzip.open(fp, "ab", compresslevel=6) as f:
+                    f.write(("\n".join(head + buf) + "\n").encode())
+                buf = []
+                with EV_LOCK:
+                    evs = EV_LOG[:]
+                    del EV_LOG[:]
+                if evs:
+                    with open(os.path.join(REPLAY_DIR, "events.jsonl"), "a") as f:
+                        f.write("".join(json.dumps(e) + "\n" for e in evs))
+        except Exception:
+            traceback.print_exc()
+            time.sleep(1)
 
 
 # ---------------- bot folder watcher (also picks up local edits to data/bots/<user>.py) ----------------
@@ -1333,6 +1413,8 @@ def scan_bots():
                 if len(team) < CARS_PER_PLAYER:
                     SIM.add_team(name, path)
                 elif os.path.getmtime(path) != team[0].mtime:
+                    with open(path, "rb") as f:
+                        archive_script(name, f.read())
                     SIM.reload_team(name)
         except Exception:
             traceback.print_exc()
@@ -1383,6 +1465,8 @@ class Handler(BaseHTTPRequestHandler):
             path = "/index.html"
         if path == "/api/track":
             return self._send(200, GEOM)
+        if path == "/api/admin/export":
+            return self._export()
         if path == "/api/params":
             return self._send(200, {"params": P, "tyres": TYRES})
         if path == "/api/stream":
@@ -1426,6 +1510,28 @@ class Handler(BaseHTTPRequestHandler):
             with open(fp, "rb") as f:
                 return self._send(200, f.read(), ctype + ("; charset=utf-8" if ctype.startswith(("text", "application/j")) else ""))
         self._send(404, {"error": "not found"})
+
+    def _export(self):
+        """Stream a tar of the race recording, script archive and stats (never accounts/sessions).
+        Only works when PITWALL_EXPORT_TOKEN is set; send it as 'Authorization: Bearer <token>'."""
+        import tarfile
+        want = os.environ.get("PITWALL_EXPORT_TOKEN", "")
+        auth = self.headers.get("Authorization", "")
+        if not want or not hmac.compare_digest(auth, "Bearer " + want):
+            return self._send(404, {"error": "not found"})
+        self.send_response(200)
+        self.send_header("Content-Type", "application/x-tar")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.close_connection = True
+        try:
+            with tarfile.open(fileobj=self.wfile, mode="w|") as tar:
+                for name in ("replay", "scripts", "bots", "stats.json", "live.json", "slots.json"):
+                    fp = os.path.join(DATA_DIR, name)
+                    if os.path.exists(fp):
+                        tar.add(fp, arcname=name)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
 
     def _import(self):
         """One-time move of a whole PITWALL data folder onto this server (e.g. Mac -> Railway).
@@ -1687,6 +1793,11 @@ def main():
     SESSIONS.update({k: v for k, v in load_json(SESSIONS_FILE, {}).items() if v in ACCOUNTS})
     threading.Thread(target=SIM.run, daemon=True).start()
     threading.Thread(target=scan_bots, daemon=True).start()
+    threading.Thread(target=recorder, daemon=True).start()
+    for fn in (os.listdir(BOT_DIR) if os.path.isdir(BOT_DIR) else []):   # current scripts are version 1 of the archive
+        if fn.endswith(".py"):
+            with open(os.path.join(BOT_DIR, fn), "rb") as f:
+                archive_script(fn[:-3], f.read())
     threading.Thread(target=stats_saver, daemon=True).start()
     want = os.environ.get("PITWALL_GRID_START", "").strip()
     if want and want != GRID_ID[0]:
