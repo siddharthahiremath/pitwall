@@ -38,6 +38,7 @@ STATIC = os.path.join(ROOT, "static")
 MAX_CODE = 200_000
 CARS_PER_PLAYER = 3
 MIN_SPEED, MAX_SPEED = 0.1, 50.0   # admin sim-speed range
+SLOTS_FILE = os.path.join(DATA_DIR, "slots.json")   # each car's permanent (random) pit box
 LIVE_FILE = os.path.join(DATA_DIR, "live.json")   # car positions, so a restart resumes mid-race
 PORT = int(os.environ.get("PORT", "8765"))
 
@@ -511,8 +512,10 @@ class Car:
                 event("pit", "%s pit stop: %s → %s (%.1fs)" % (self.name, old, self.next_tyre, t), car=self.id)
         elif self.status == "boxed":
             self.pit_v = 0.0
-            self.box_timer -= dt
-            if self.box_timer <= 0:
+            held = time.time() < SIM.start_at   # grid start: everyone waits in their box for lights out
+            if not held:
+                self.box_timer -= dt
+            if self.box_timer <= 0 and not held:
                 self.compound = self.next_tyre if self.next_tyre in TYRES else "medium"
                 self.wear = 0.0
                 self.damage = 0.0
@@ -814,13 +817,52 @@ class Sim:
         self.tick = 0
         self.sparks = []
         self.rate = 1.0
+        self.start_at = 0.0     # wall-clock time of the next grid start (cars stay boxed until then)
 
-    def free_slot(self):
+    def free_slot(self, name=None):
+        """A car's permanent pit box: the one in SLOTS if it's free, otherwise a random free box
+        (not one reserved for another car), which then becomes its permanent box."""
         used = {c.slot for c in self.cars.values()}
-        for i in range(track.max_boxes):
-            if i not in used:
-                return i
-        return None
+        if name and SLOTS.get(name) is not None and SLOTS[name] not in used and SLOTS[name] < track.max_boxes:
+            return SLOTS[name]
+        reserved = {v for k, v in SLOTS.items() if k != name}
+        free = [i for i in range(track.max_boxes) if i not in used and i not in reserved] or \
+               [i for i in range(track.max_boxes) if i not in used]
+        if not free:
+            return None
+        slot = random.choice(free)
+        if name:
+            SLOTS[name] = slot
+            save_json(SLOTS_FILE, SLOTS)
+        return slot
+
+    def grid_start(self, at):
+        """Reset every lap count, shuffle all cars into random permanent pit boxes, and hold them
+        there until wall-clock time `at`, when they all leave at once."""
+        with self.lock:
+            cars = list(self.cars.values())
+            boxes = random.sample(range(track.max_boxes), len(cars))
+            SLOTS.clear()
+            for c, b in zip(cars, boxes):
+                c.slot = b
+                SLOTS[c.name] = b
+            save_json(SLOTS_FILE, SLOTS)
+            STATS.clear()
+            for c in cars:
+                c.laps = 0
+                c.last_lap = c.best_lap = None
+                c.lap_start = None
+                c.pit_stops = 0
+                c.collisions = 0
+                c.dist = 0.0
+                c.cp = [False, False, False]
+                c.put_in_box(first=True, wait=0.0)
+                c.next_tyre = "medium"
+            self.start_at = at
+        save_stats()
+        save_live()
+        event("reset", "Race control: laps reset, cars to random pit boxes, lights out at %s" %
+              time.strftime("%H:%M:%S UTC", time.gmtime(at)))
 
     def team(self, owner):
         return sorted((c for c in self.cars.values() if c.owner == owner), key=lambda c: c.num)
@@ -840,9 +882,12 @@ class Sim:
                     continue
                 name = "%s#%d" % (owner, num)
                 live = LIVE.get(name)
-                slot = live.get("slot") if live else None
+                slot = SLOTS.get(name, live.get("slot") if live else None)
                 if slot is None or slot in {c.slot for c in self.cars.values()}:
-                    slot = self.free_slot()
+                    slot = self.free_slot(name)
+                elif name not in SLOTS:
+                    SLOTS[name] = slot
+                    save_json(SLOTS_FILE, SLOTS)
                 if slot is None:
                     break
                 car = Car(self.next_id, owner, num, path, slot, color)
@@ -1015,7 +1060,7 @@ class Sim:
                     "lhit": "".join({"edge": "e", "wall": "w", "car": "c"}.get(k, "-") for k in c.lidar_hit),
                 })
             sparks, self.sparks = self.sparks, []
-            return {"t": round(self.t, 3), "paused": self.paused, "speed": self.speed, "rate": round(self.rate, 2), "cars": out, "sparks": sparks}
+            return {"t": round(self.t, 3), "paused": self.paused, "speed": self.speed, "rate": round(self.rate, 2), "start_at": self.start_at, "now": time.time(), "cars": out, "sparks": sparks}
 
     def run(self):
         """Fixed-step physics at PHYS_HZ, run self.speed times faster than real time when the CPU allows.
@@ -1083,7 +1128,8 @@ def save_live():
             d = {k: getattr(c, k) for k in LIVE_FIELDS}
             d["lap_age"] = (SIM.t - c.lap_start) if c.lap_start is not None else None
             cars[c.name] = d
-    save_json(LIVE_FILE, {"saved_at": time.time(), "cars": cars, "speed": SIM.speed, "paused": SIM.paused})
+    save_json(LIVE_FILE, {"saved_at": time.time(), "cars": cars, "speed": SIM.speed, "paused": SIM.paused,
+                          "start_at": SIM.start_at, "grid_id": GRID_ID[0]})
 
 
 def restore_live(car):
@@ -1374,6 +1420,9 @@ class Handler(BaseHTTPRequestHandler):
                     if car:
                         car.put_in_box(wait=2.0)
                         event("tow", "%s reset to pit box" % car.name, car=car.id)
+                elif act == "grid_start":
+                    at = parse_when(data.get("at", time.time() + 60))
+                    threading.Thread(target=SIM.grid_start, args=(at,), daemon=True).start()
                 elif act == "rebox_all":
                     for c in SIM.cars.values():
                         c.put_in_box(wait=1.0 + 0.8 * c.slot)
@@ -1480,6 +1529,23 @@ def live_payload(last_ev):
 ACCOUNTS = {}
 SESSIONS = {}
 LIVE = {}
+SLOTS = {}
+GRID_ID = [""]   # PITWALL_GRID_START value already applied (so a redeploy doesn't reset laps again)
+
+
+def parse_when(v):
+    v = str(v).strip()
+    try:
+        return float(v)
+    except ValueError:
+        import datetime
+        return datetime.datetime.fromisoformat(v.replace("Z", "+00:00")).timestamp()
+
+
+def pending_grid_start(at):
+    """Apply a grid start once the cars have been loaded."""
+    time.sleep(4)
+    SIM.grid_start(at)
 
 
 def main():
@@ -1491,7 +1557,10 @@ def main():
     for k in [k for k in STATS if "#" not in k]:          # stats from the one-car-per-player days -> car #1
         STATS.setdefault(k + "#1", STATS[k])
         del STATS[k]
+    SLOTS.update(load_json(SLOTS_FILE, {}))
     live = load_json(LIVE_FILE, {})
+    SIM.start_at = float(live.get("start_at", 0) or 0)
+    GRID_ID[0] = live.get("grid_id", "")
     if time.time() - live.get("saved_at", 0) < 600:        # only resume positions after a quick restart
         LIVE.update(live.get("cars", {}))
         SIM.speed = clamp(num(live.get("speed", 1.0), 1.0), MIN_SPEED, MAX_SPEED)
@@ -1503,6 +1572,11 @@ def main():
     threading.Thread(target=SIM.run, daemon=True).start()
     threading.Thread(target=scan_bots, daemon=True).start()
     threading.Thread(target=stats_saver, daemon=True).start()
+    want = os.environ.get("PITWALL_GRID_START", "").strip()
+    if want and want != GRID_ID[0]:
+        GRID_ID[0] = want
+        SIM.start_at = parse_when(want)    # hold everyone right away; laps reset once cars are loaded
+        threading.Thread(target=pending_grid_start, args=(SIM.start_at,), daemon=True).start()
     host = os.environ.get("HOST", "127.0.0.1")
     srv = ThreadingHTTPServer((host, PORT), Handler)
     srv.daemon_threads = True

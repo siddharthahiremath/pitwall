@@ -183,3 +183,16 @@ button.link:hover { background: none; color: var(--text); }
 .custom-speed input:focus { border-color: var(--accent); }
 .custom-speed input.on { border-color: var(--accent); box-shadow: inset 0 -2px 0 var(--accent); }
 .custom-speed i { font-style: normal; color: var(--muted); font-size: 12px; }
+
+#countdown { position: absolute; left: 50%; top: 18px; transform: translateX(-50%); z-index: 5; pointer-events: none;
+  background: rgba(10, 12, 14, 0.86); border: 1px solid rgba(255,255,255,0.12); border-radius: 12px;
+  padding: 12px 22px 14px; text-align: center; color: #fff; box-shadow: 0 8px 30px rgba(0,0,0,0.45); min-width: 220px; }
+#countdown[hidden] { display: none; }
+#countdown .cd-label { font: 600 11px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: 0.18em; color: #9aa3ad; min-height: 13px; }
+#countdown .cd-time { font: 700 40px/1.1 ui-monospace, SFMono-Regular, Menlo, monospace; font-variant-numeric: tabular-nums; margin: 4px 0 8px; }
+#countdown.go .cd-time { color: #3ddc84; }
+#countdown .cd-lights { display: flex; gap: 8px; justify-content: center; }
+#countdown .cd-lights i { width: 16px; height: 16px; border-radius: 50%; background: #2a2f35; border: 1px solid #3a4048; }
+#countdown .cd-lights i.on { background: #ff2a2a; border-color: #ff6b6b; box-shadow: 0 0 10px #ff2a2a; }
+#countdown .cd-sub { margin-top: 8px; font-size: 11px; color: #9aa3ad; }
+@media (max-width: 600px) { #countdown { top: 8px; padding: 8px 14px 10px; min-width: 0; } #countdown .cd-time { font-size: 28px; } }

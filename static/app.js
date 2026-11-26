@@ -529,6 +529,7 @@ function onSnap(s) {
   if (s.events && s.events.length) addEvents(s.events);
   if (selected == null && s.cars.length) selected = s.cars[0].id;
   if (selected != null && !s.cars.find((c) => c.id === selected)) selected = s.cars.length ? s.cars[0].id : null;
+  if (s.start_at != null && s.now != null) { raceStart.at = s.start_at; raceStart.skew = s.now - Date.now() / 1000; }
   if (now - lastBoard > 200) {
     lastBoard = now;
     updateBoard(s); updateSel(s);
@@ -781,3 +782,23 @@ $("#upload").addEventListener("change", async (e) => {
 });
 
 boot();
+
+// ---- grid start countdown (server sends start_at + its clock, so the countdown is in server time) ----
+const raceStart = { at: 0, skew: 0 };
+function tickCountdown() {
+  const el = document.getElementById("countdown");
+  if (!el) return;
+  const left = raceStart.at - (Date.now() / 1000 + raceStart.skew);
+  if (!raceStart.at || left < -3) { el.hidden = true; return; }
+  el.hidden = false;
+  const go = left <= 0;
+  el.classList.toggle("go", go);
+  const t = Math.max(0, Math.ceil(left));
+  const h = Math.floor(t / 3600), m = Math.floor(t / 60) % 60, sec = t % 60;
+  el.querySelector(".cd-label").textContent = go ? "" : "LIGHTS OUT IN";
+  el.querySelector(".cd-time").textContent = go ? "GO GO GO" :
+    (h ? h + ":" + String(m).padStart(2, "0") : m) + ":" + String(sec).padStart(2, "0");
+  const lit = go ? 0 : left <= 5 ? Math.min(5, 6 - Math.ceil(left)) : 0;   // F1-style: one light per second for the last 5 s
+  el.querySelectorAll(".cd-lights i").forEach((d, i) => d.classList.toggle("on", i < lit));
+}
+setInterval(tickCountdown, 100);
