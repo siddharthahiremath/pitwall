@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PITWALL · Rules</title>
+<meta name="description" content="How to enter PITWALL, the always-on bot racing sim: write a Python script, race 3 cars, score points for your team.">
+<style>
+:root {
+  --bg: #0a0c10; --panel: #11141b; --panel2: #161a23; --line: #232937;
+  --text: #e9edf4; --muted: #8790a3; --accent: #ff2d3f; --good: #2bd96b;
+  --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+  --sans: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.6 var(--sans); }
+a { color: var(--accent); }
+header { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 16px;
+  border-bottom: 1px solid var(--line); background: linear-gradient(#11141b, #0d1016); }
+.logo { font-weight: 800; letter-spacing: .14em; font-size: 18px; font-style: italic; color: var(--text); text-decoration: none; }
+.logo b { color: var(--accent); }
+.back { color: var(--muted); text-decoration: none; font-size: 14px; border: 1px solid var(--line); border-radius: 7px; padding: 6px 11px; background: var(--panel2); }
+.back:hover { color: var(--text); }
+main { max-width: 760px; margin: 0 auto; padding: 32px 16px 80px; }
+h1 { font-size: clamp(30px, 6vw, 44px); line-height: 1.1; margin: 0 0 12px; letter-spacing: -.01em; }
+h1 em { color: var(--accent); font-style: italic; }
+.lede { color: var(--muted); font-size: 18px; margin: 0 0 28px; }
+h2 { font-size: 21px; margin: 40px 0 10px; padding-top: 18px; border-top: 1px solid var(--line); }
+h2 .n { font-family: var(--mono); color: var(--accent); font-size: 15px; margin-right: 8px; }
+ul, ol { padding-left: 22px; } li { margin: 6px 0; }
+code { font-family: var(--mono); font-size: .88em; background: #1b202b; padding: 1px 6px; border-radius: 4px; }
+pre { font-family: var(--mono); font-size: 13.5px; line-height: 1.5; background: var(--panel); border: 1px solid var(--line);
+  border-radius: 10px; padding: 14px 16px; overflow-x: auto; }
+.cta { background: var(--panel); border: 1px solid var(--line); border-left: 4px solid var(--accent); border-radius: 10px; padding: 18px 20px; margin: 24px 0; }
+.cta p { margin: 0 0 6px; } .cta p:last-child { margin: 0; }
+.cta .mail { font-family: var(--mono); font-size: 17px; word-break: break-all; }
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px; margin: 16px 0; }
+.stat { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; }
+.stat b { display: block; font-size: 22px; color: var(--text); }
+.stat span { color: var(--muted); font-size: 14px; }
+table { width: 100%; border-collapse: collapse; font-size: 15px; margin: 12px 0; }
+th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); }
+th { color: var(--muted); font-weight: 600; font-size: 13px; text-transform: uppercase; letter-spacing: .05em; }
+.muted { color: var(--muted); }
+footer { color: var(--muted); font-size: 14px; margin-top: 48px; }
+</style>
+</head>
+<body>
+<header>
+  <a class="logo" href="/">PIT<b>WALL</b></a>
+  <a class="back" href="/">← Watch the race</a>
+</header>
+
+<main>
+  <h1>Write a bot. <em>Race it.</em></h1>
+  <p class="lede">PITWALL is an F1-style racing sim where every car is driven by a Python script. The race never stops. You write the driver, deploy it, and watch your three cars fight for position against everyone else's code, live.</p>
+
+  <div class="cta">
+    <p><b>Want in?</b> Email me and I'll send you a username and password.</p>
+    <p class="mail"><a href="mailto:siddharthanhiremath@gmail.com?subject=PITWALL%20account">siddharthanhiremath@gmail.com</a></p>
+    <p class="muted">Tell me the team name you want. One account per person.</p>
+  </div>
+
+  <div class="grid">
+    <div class="stat"><b>3 cars</b><span>per team, all running your script</span></div>
+    <div class="stat"><b>~20×/sec</b><span>your <code>drive()</code> gets called</span></div>
+    <div class="stat"><b>24/7</b><span>no finish line, no pause</span></div>
+  </div>
+
+  <h2><span class="n">01</span>How to enter</h2>
+  <ol>
+    <li>Email <a href="mailto:siddharthanhiremath@gmail.com?subject=PITWALL%20account">siddharthanhiremath@gmail.com</a> for an account.</li>
+    <li>Log in on <a href="/">the race site</a> and click <b>My script</b>. You get a working starter bot you can deploy straight away.</li>
+    <li>Hit <b>Deploy</b> (or use <b>Upload .py</b>). Your 3 cars leave the pits and start racing.</li>
+    <li>Improve it and redeploy as often as you like. Each deploy hot-swaps the code on all 3 cars mid-lap. Laps, positions and tyres carry over.</li>
+  </ol>
+
+  <h2><span class="n">02</span>What your bot does</h2>
+  <p>Your file defines one function. It gets everything the car can see and returns what the car should do:</p>
+<pre>def drive(state):
+    return {
+        "throttle": 1.0,   # -1..1
+        "brake":    0.0,   # 0..1
+        "steer":    0.0,   # -1..1  (+ = left)
+        "drs":      0,     # 0..100: faster on straights, less grip in corners
+        "pit":      False, # True = pit next time past the entry
+        "tyre":     "medium",  # soft | medium | hard, fitted at your next stop
+    }</pre>
+  <p><code>state</code> includes your car (speed, position, tyre wear, damage), every other car, a 36-ray lidar scan, the next 400&nbsp;m of track, the full map and the physics constants. The full list is at the top of the starter script.</p>
+  <ul>
+    <li><code>state["me"]["car_number"]</code> is 1, 2 or 3, so one script can give each car a different job.</li>
+    <li>Cars marked <code>teammate</code> in <code>state["cars"]</code> are yours.</li>
+    <li><code>print()</code> output shows up in your car's log. Only you can see your logs and your code.</li>
+    <li>Python standard library and <code>numpy</code> are available. No network, no file access.</li>
+  </ul>
+
+  <h2><span class="n">03</span>Scoring</h2>
+  <p>Every car scores <b>points equal to how many places it is from last</b>. Last place is worth 1 point, second-to-last 2, and so on. Your team score is the sum of your 3 cars.</p>
+  <table>
+    <thead><tr><th>Example: 9 cars on track</th><th>Points</th></tr></thead>
+    <tbody>
+      <tr><td>P1</td><td>9</td></tr>
+      <tr><td>P2</td><td>8</td></tr>
+      <tr><td>P5</td><td>5</td></tr>
+      <tr><td>P9 (last)</td><td>1</td></tr>
+    </tbody>
+  </table>
+  <p>So a team with cars in P1, P5 and P9 has 15 points. All three cars matter: a fast lead car can't carry two slow ones.</p>
+  <p>Standings are live on the main page. The race has no scheduled end. Whatever the standings say when a race is called is the result.</p>
+
+  <h2><span class="n">04</span>Race starts and qualifying</h2>
+  <ul>
+    <li>When a new race is started, there's a countdown and every car leaves its pit box at the same moment.</li>
+    <li>Some races open with <b>qualifying</b>: each team gets one out-lap and one flying lap on an empty track. That one time sets the grid for all 3 of your cars.</li>
+    <li>If you join while a race is running, your cars just head out from the pits and start racing.</li>
+  </ul>
+
+  <h2><span class="n">05</span>The physics, in one minute</h2>
+  <ul>
+    <li><b>Grip is limited.</b> Ask for more than the tyres have and you slide, wear the tyres fast and maybe spin.</li>
+    <li><b>Braking and turning share grip.</b> Braking hard mid-corner means less steering.</li>
+    <li><b>Downforce grows with speed</b>, so fast corners can be taken faster than you'd expect.</li>
+    <li><b>Grass has half grip.</b> Kerbs are slightly slippery. Walls hurt.</li>
+    <li><b>Tyres:</b> softs grip most and wear fastest, hards last longest. Every compound falls off a cliff around 75% wear, so you have to pit.</li>
+    <li><b>Collisions are real.</b> Car-to-car and wall hits push you around and cause damage, which slows you until you pit.</li>
+    <li><b>Pit stops</b> are automatic once you request one: the crew drives you in, changes tyres, repairs damage and sends you back out.</li>
+    <li>A car that's stuck for 10 seconds gets <b>towed</b> back to its box.</li>
+  </ul>
+
+  <h2><span class="n">06</span>The rules</h2>
+  <ol>
+    <li><b>One account per person.</b> Don't share your login.</li>
+    <li><b>Your car is driven by your script.</b> Write it yourself or with any tools you like, AI included. Just no manual driving.</li>
+    <li><b>Race the cars, not the server.</b> Don't try to break out of the sandbox, crash or slow the server, or read other players' code or data. Doing so gets your account removed.</li>
+    <li><b>Contact is racing.</b> The physics decides what happens in a collision. Hard racing is fine. If something looks broken, tell me rather than exploiting it.</li>
+    <li><b>Bugs get fixed.</b> If you find a physics or server bug, report it. Fixes may change the sim mid-race; it's the same for everyone.</li>
+    <li><b>Keep it under 200&nbsp;KB.</b> That's the max script size.</li>
+    <li><b>The organizer's call is final</b> on disputes, restarts and when a race ends.</li>
+  </ol>
+
+  <h2><span class="n">07</span>Tips to get started</h2>
+  <ul>
+    <li>Deploy the starter bot first. It works, and you'll learn a lot just watching it.</li>
+    <li>Click your car on the main page to see its telemetry, onboard camera and lidar.</li>
+    <li>Going fast alone is half the problem. Getting past other cars without crashing is the other half.</li>
+    <li>Plan your pit stops. Running past the tyre cliff costs far more than a stop.</li>
+  </ul>
+
+  <div class="cta">
+    <p><b>Ready?</b> Email for your login and get your cars on track.</p>
+    <p class="mail"><a href="mailto:siddharthanhiremath@gmail.com?subject=PITWALL%20account">siddharthanhiremath@gmail.com</a></p>
+  </div>
+
+  <footer>PITWALL is open source: <a href="https://github.com/siddharthahiremath/pitwall">github.com/siddharthahiremath/pitwall</a></footer>
+</main>
+</body>
+</html>
